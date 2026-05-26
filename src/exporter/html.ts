@@ -194,21 +194,24 @@ function conversationToHtml(conversation: ConversationResult, avatar: string, me
         ? `<details>
     <summary>Metadata</summary>
     <div class="metadata_container">
-        ${_metaList.map(([key, value]) => `<div class="metadata_item"><div>${key}</div><div>${value}</div></div>`).join('\n')}
+        ${_metaList.map(([key, value]) => `<div class="metadata_item"><div>${escapeHtml(key)}</div><div>${escapeHtml(value)}</div></div>`).join('\n')}
     </div>
 </details>`
         : ''
 
+    // Use function replacements so values containing `$` are inserted verbatim
+    // (string replacements interpret `$$`, `$&`, etc.). User-influenced values
+    // (title/source/avatar/lang/theme) are escaped to prevent HTML injection.
     const html = templateHtml
-        .replaceAll('{{title}}', title)
-        .replaceAll('{{date}}', date)
-        .replaceAll('{{time}}', time)
-        .replaceAll('{{source}}', source)
-        .replaceAll('{{lang}}', lang)
-        .replaceAll('{{theme}}', theme)
-        .replaceAll('{{avatar}}', avatar)
-        .replaceAll('{{details}}', detailsHtml)
-        .replaceAll('{{content}}', conversationHtml)
+        .replaceAll('{{title}}', () => escapeHtml(title))
+        .replaceAll('{{date}}', () => escapeHtml(date))
+        .replaceAll('{{time}}', () => escapeHtml(time))
+        .replaceAll('{{source}}', () => escapeHtml(source))
+        .replaceAll('{{lang}}', () => escapeHtml(lang))
+        .replaceAll('{{theme}}', () => escapeHtml(theme))
+        .replaceAll('{{avatar}}', () => safeCssUrl(avatar))
+        .replaceAll('{{details}}', () => detailsHtml)
+        .replaceAll('{{content}}', () => conversationHtml)
     return html
 }
 
@@ -307,12 +310,12 @@ function transformContent(
         case 'text':
             return postProcess(content.parts?.join('\n') || '')
         case 'code':
-            return `Code:\n\`\`\`\n${content.text}\n\`\`\`` || ''
+            return `Code:\n\`\`\`\n${escapeHtml(content.text)}\n\`\`\`` || ''
         case 'execution_output':
             if (metadata?.aggregate_result?.messages) {
                 return metadata.aggregate_result.messages
                     .filter(msg => msg.message_type === 'image')
-                    .map(msg => `<img src="${msg.image_url}" height="${msg.height}" width="${msg.width}" />`)
+                    .map(msg => `<img src="${escapeHtml(msg.image_url)}" height="${escapeHtml(String(msg.height))}" width="${escapeHtml(String(msg.width))}" />`)
                     .join('\n')
             }
             return postProcess(`Result:\n\`\`\`\n${content.text}\n\`\`\`` || '')
@@ -332,8 +335,8 @@ function transformContent(
         case 'multimodal_text': {
             return content.parts?.map((part) => {
                 if (typeof part === 'string') return postProcess(part)
-                if (part.content_type === 'image_asset_pointer') return `<img src="${part.asset_pointer}" height="${part.height}" width="${part.width}" />`
-                if (part.content_type === 'audio_transcription') return `<div style="font-style: italic; opacity: 0.65;">“${part.text}”</div>`
+                if (part.content_type === 'image_asset_pointer') return `<img src="${escapeHtml(part.asset_pointer)}" height="${escapeHtml(String(part.height))}" width="${escapeHtml(String(part.width))}" />`
+                if (part.content_type === 'audio_transcription') return `<div style="font-style: italic; opacity: 0.65;">“${escapeHtml(part.text)}”</div>`
                 if (part.content_type === 'audio_asset_pointer') return null
                 if (part.content_type === 'real_time_user_audio_video_asset_pointer') return null
                 return postProcess('[Unsupported multimodal content]')
@@ -378,4 +381,19 @@ function escapeHtml(html: string) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;')
+}
+
+/**
+ * Sanitize a value that is interpolated into an unquoted CSS `url(...)`
+ * (the exported avatar). The avatar is normally a canvas-produced data URI,
+ * but we still guard against breaking out of `url()` or the surrounding
+ * `<style>` block. Anything that is not a data: URI is dropped.
+ */
+function safeCssUrl(url: string): string {
+    if (!url.startsWith('data:')) return ''
+    // Strip only the characters that could terminate the unquoted url(...), the
+    // CSS rule, or the surrounding <style> element. Legitimate data URIs
+    // (base64 / percent-encoded) never contain these — note `;` and `,` are
+    // kept because data URIs require them (e.g. `data:image/png;base64,...`).
+    return url.replace(/["'()<>{}\s]/g, '')
 }

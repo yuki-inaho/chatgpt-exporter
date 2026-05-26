@@ -34,8 +34,8 @@
 // @match              https://new.oaifree.com/gpts/*
 // @match              https://new.oaifree.com/share/*
 // @match              https://new.oaifree.com/share/*/continue
-// @require            https://cdn.jsdelivr.net/npm/jszip@3.9.1/dist/jszip.min.js
-// @require            https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js
+// @require            https://cdn.jsdelivr.net/npm/jszip@3.9.1/dist/jszip.min.js#sha384=QC9YCuBRpz3M81TBQGFGTrpTo2B2igltSqvOvHmbG3mb9X3Ftljj+WWRfI6VojME
+// @require            https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js#sha384=ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H
 // @grant              GM_deleteValue
 // @grant              GM_getValue
 // @grant              GM_setValue
@@ -9257,14 +9257,14 @@ html {
     <link rel="icon" href="https://chat.openai.com/favicon.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{{title}}</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/github-dark.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js"><\/script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/github-dark.min.css" integrity="sha512-rO+olRTkcf304DQBxSWxln8JXCzTHlKnIdnMUwYvQa9/Jd4cQaNkItIUj6Z4nvW1dqK0SKXLbn9h4KwZTNtAyw==" crossorigin="anonymous" referrerpolicy="no-referrer">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js" integrity="sha512-bgHRAiTjGrzHzLyKOnpFvaEpGzJet3z4tZnXGjpsCcqOnAH6VGUx9frc5bcIhKTVLEiCO6vEhNAgx5jtLUYrfA==" crossorigin="anonymous" referrerpolicy="no-referrer"><\/script>
     <script>
         hljs.highlightAll()
     <\/script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.3/katex.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.3/katex.min.js"><\/script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.3/contrib/auto-render.min.js"><\/script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.3/katex.min.css" integrity="sha512-6VMVcy7XQNyarhVuiL50FzpgCFKsyTd6YO93aaQEyET+BNaWvj0IgKR86Bf6+AmWczxAcSnL+JGjo+iStgO1gQ==" crossorigin="anonymous" referrerpolicy="no-referrer">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.3/katex.min.js" integrity="sha512-b9IKj4LCNrtCPBhceRcoYOHWW/S2q9fpl7iAJlyxYpykRj1SKM7FE9+E0NEnJ8g8ni47LBr2GuX9qzg/xeuwzQ==" crossorigin="anonymous" referrerpolicy="no-referrer"><\/script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.3/contrib/auto-render.min.js" integrity="sha512-iWiuBS5nt6r60fCz26Nd0Zqe0nbk1ZTIQbl3Kv7kYsX+yKMUFHzjaH2+AnM6vp2Xs+gNmaBAVWJjSmuPw76Efg==" crossorigin="anonymous" referrerpolicy="no-referrer"><\/script>
     <script>
         document.addEventListener("DOMContentLoaded", function() {
             renderMathInElement(document.body, {
@@ -21206,8 +21206,36 @@ html {
       extensions: [gfmToMarkdown()]
     });
   }
+  function sanitizeUrl(url, allowDataImage) {
+    const cleaned = Array.from(url).filter((ch) => {
+      const code2 = ch.charCodeAt(0);
+      return code2 > 32 && code2 !== 127;
+    }).join("");
+    if (/^(?:javascript|vbscript|file):/i.test(cleaned)) return "";
+    if (/^data:/i.test(cleaned)) {
+      return allowDataImage && /^data:image\//i.test(cleaned) ? url : "";
+    }
+    return url;
+  }
+  function sanitizeHastUrls(node2) {
+    if (!node2 || typeof node2 !== "object") return;
+    if (node2.type === "element" && node2.properties) {
+      const props = node2.properties;
+      if (node2.tagName === "a" && typeof props.href === "string") {
+        props.href = sanitizeUrl(props.href, false);
+      }
+      if ((node2.tagName === "img" || node2.tagName === "source") && typeof props.src === "string") {
+        props.src = sanitizeUrl(props.src, true);
+      }
+    }
+    if (Array.isArray(node2.children)) {
+      for (const child of node2.children) sanitizeHastUrls(child);
+    }
+  }
   function toHtml(node2) {
-    return toHtml$1(toHast(node2));
+    const hast = toHast(node2);
+    sanitizeHastUrls(hast);
+    return toHtml$1(hast);
   }
   function flatMap(tree, fn2) {
     function transform(node2, i2, parent) {
@@ -21349,10 +21377,10 @@ html {
     const detailsHtml = _metaList.length > 0 ? `<details>
     <summary>Metadata</summary>
     <div class="metadata_container">
-        ${_metaList.map(([key2, value]) => `<div class="metadata_item"><div>${key2}</div><div>${value}</div></div>`).join("\n")}
+        ${_metaList.map(([key2, value]) => `<div class="metadata_item"><div>${escapeHtml(key2)}</div><div>${escapeHtml(value)}</div></div>`).join("\n")}
     </div>
 </details>` : "";
-    const html2 = templateHtml.replaceAll("{{title}}", title2).replaceAll("{{date}}", date).replaceAll("{{time}}", time).replaceAll("{{source}}", source).replaceAll("{{lang}}", lang).replaceAll("{{theme}}", theme).replaceAll("{{avatar}}", avatar).replaceAll("{{details}}", detailsHtml).replaceAll("{{content}}", conversationHtml);
+    const html2 = templateHtml.replaceAll("{{title}}", () => escapeHtml(title2)).replaceAll("{{date}}", () => escapeHtml(date)).replaceAll("{{time}}", () => escapeHtml(time)).replaceAll("{{source}}", () => escapeHtml(source)).replaceAll("{{lang}}", () => escapeHtml(lang)).replaceAll("{{theme}}", () => escapeHtml(theme)).replaceAll("{{avatar}}", () => safeCssUrl(avatar)).replaceAll("{{details}}", () => detailsHtml).replaceAll("{{content}}", () => conversationHtml);
     return html2;
   }
   function transformAuthor$2(author) {
@@ -21423,11 +21451,11 @@ html {
       case "code":
         return `Code:
 \`\`\`
-${content2.text}
+${escapeHtml(content2.text)}
 \`\`\`` || "";
       case "execution_output":
         if ((_b = metadata == null ? void 0 : metadata.aggregate_result) == null ? void 0 : _b.messages) {
-          return metadata.aggregate_result.messages.filter((msg) => msg.message_type === "image").map((msg) => `<img src="${msg.image_url}" height="${msg.height}" width="${msg.width}" />`).join("\n");
+          return metadata.aggregate_result.messages.filter((msg) => msg.message_type === "image").map((msg) => `<img src="${escapeHtml(msg.image_url)}" height="${escapeHtml(String(msg.height))}" width="${escapeHtml(String(msg.width))}" />`).join("\n");
         }
         return postProcess(`Result:
 \`\`\`
@@ -21449,8 +21477,8 @@ ${content2.text}
       case "multimodal_text": {
         return ((_d = content2.parts) == null ? void 0 : _d.map((part) => {
           if (typeof part === "string") return postProcess(part);
-          if (part.content_type === "image_asset_pointer") return `<img src="${part.asset_pointer}" height="${part.height}" width="${part.width}" />`;
-          if (part.content_type === "audio_transcription") return `<div style="font-style: italic; opacity: 0.65;">“${part.text}”</div>`;
+          if (part.content_type === "image_asset_pointer") return `<img src="${escapeHtml(part.asset_pointer)}" height="${escapeHtml(String(part.height))}" width="${escapeHtml(String(part.width))}" />`;
+          if (part.content_type === "audio_transcription") return `<div style="font-style: italic; opacity: 0.65;">“${escapeHtml(part.text)}”</div>`;
           if (part.content_type === "audio_asset_pointer") return null;
           if (part.content_type === "real_time_user_audio_video_asset_pointer") return null;
           return postProcess("[Unsupported multimodal content]");
@@ -21477,6 +21505,10 @@ ${content2.text}
   }
   function escapeHtml(html2) {
     return html2.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+  }
+  function safeCssUrl(url) {
+    if (!url.startsWith("data:")) return "";
+    return url.replace(/["'()<>{}\s]/g, "");
   }
   class Effect {
     constructor() {

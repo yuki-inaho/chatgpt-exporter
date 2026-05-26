@@ -21,4 +21,8 @@ node_modules
 *.sw?
 
 tsconfig.tsbuildinfo
+
+# Agent / tooling artifacts and scratch output
 .claude
+.serena
+temp/
