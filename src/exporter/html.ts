@@ -92,7 +92,7 @@ function conversationToHtml(conversation: ConversationResult, avatar: string, me
         const model = message?.metadata?.model_slug === 'gpt-4' ? 'GPT-4' : 'GPT-3'
         const authorType = message.author.role === 'user' ? 'user' : model
         const avatarEl = message.author.role === 'user'
-            ? `<img alt="${author}" />`
+            ? `<img alt="${escapeHtml(author)}" />`
             : '<svg width="41" height="41"><use xlink:href="#chatgpt" /></svg>'
 
         let postSteps: Array<(input: string) => string> = []

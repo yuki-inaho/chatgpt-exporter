@@ -21312,7 +21312,7 @@ html {
       const author = transformAuthor$2(message.author);
       const model2 = ((_a = message == null ? void 0 : message.metadata) == null ? void 0 : _a.model_slug) === "gpt-4" ? "GPT-4" : "GPT-3";
       const authorType = message.author.role === "user" ? "user" : model2;
-      const avatarEl = message.author.role === "user" ? `<img alt="${author}" />` : '<svg width="41" height="41"><use xlink:href="#chatgpt" /></svg>';
+      const avatarEl = message.author.role === "user" ? `<img alt="${escapeHtml(author)}" />` : '<svg width="41" height="41"><use xlink:href="#chatgpt" /></svg>';
       let postSteps = [];
       if (message.author.role === "assistant") {
         postSteps.push((input) => transformFootNotes$2(input, message.metadata));
