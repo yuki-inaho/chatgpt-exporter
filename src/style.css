@@ -11,8 +11,9 @@ body[data-time-format="24"] span[data-time-format="24"] {
 }
 
 .Select {
-    padding: 0 0 0 0.5rem;
-    width: 7.5rem;
+    padding: 0 2rem 0 0.5rem;
+    width: auto;
+    min-width: 7.5rem;
     border-radius: 4px;
     box-shadow: 0 0 0 1px #6f6e77;
 }
@@ -25,20 +26,20 @@ body[data-time-format="24"] span[data-time-format="24"] {
 
 html {
     --ce-text-primary: var(--text-primary, #0d0d0d);
-    --ce-menu-primary: var(--sidebar-surface-primary, #f9f9f9);
+    --ce-menu-primary: #ffffff;
     --ce-menu-secondary: var(--sidebar-surface-secondary, #ececec);
-    --ce-border-light: var(--border-light, rgba(0, 0, 0, .1));
+    --ce-border-light: #0d0d0d26;
 }
 
 .dark {
     --ce-text-primary: var(--text-primary, #ececec);
-    --ce-menu-primary: var(--sidebar-surface-primary, #171717);
+    --ce-menu-primary: #2A2A2A;
     --ce-menu-secondary: var(--sidebar-surface-secondary, #212121);
-    --ce-border-light: var(--border-default, rgba(0, 0, 0, .05));
+    --ce-border-light: var(--border-default, rgba(255, 255, 255, .15));
 }
 
-.bg-menu {
-    background-color: var(--ce-menu-secondary);
+.dark .bg-menu {
+    background-color: var(--ce-menu-primary);
 }
 
 .border-menu {
@@ -51,6 +52,46 @@ html {
 
 .menu-item[disabled] {
     filter: brightness(0.5);
+}
+
+.ce-nav-trigger {
+    min-width: 0;
+    border: 0;
+    color: var(--ce-text-primary);
+}
+
+.ce-nav-trigger .ce-menu-item-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ce-nav-trigger-collapsed {
+    width: 32px;
+    height: 32px;
+    margin: 0 auto 0.5rem;
+    padding: 0;
+    justify-content: center;
+    gap: 0;
+    border-radius: 8px;
+    color: var(--text-secondary, var(--ce-text-primary));
+}
+
+.ce-nav-trigger-collapsed:hover {
+    background-color: var(--sidebar-surface-secondary, rgba(255, 255, 255, 0.1));
+}
+
+.ce-nav-trigger-collapsed .ce-menu-item-text {
+    display: none;
+}
+
+.ce-card {
+    border-radius: 1rem;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.dark .ce-card {
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
 .inputFieldSet {

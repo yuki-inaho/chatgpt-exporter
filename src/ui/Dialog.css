@@ -32,6 +32,14 @@
     border-width: 1px;
 }
 
+.DialogContent._export {
+    background-color: #ffffff;
+}
+
+.dark .DialogContent._export {
+    background-color: #2a2a2a;
+}
+
 .DialogContent input[type="checkbox"] {
     border: none;
     outline: none;
@@ -311,6 +319,17 @@
     .SelectListHeaderCellActive { color: #60a5fa; }
 }
 
+
+@media (max-width: 480px) {
+    .DialogContent { max-height: 90vh; }
+    .SelectListHeaderCell:last-child { display: none; }
+    .SelectItemMeta:last-child { display: none; }
+    .SelectToolbar .Button.neutral,
+    .SelectToolbar input[type="number"] { display: none; }
+    .ActionBar { justify-content: flex-end; }
+    .ActionBar > .Select { width: 100%; }
+    .ActionBar > .flex-grow { display: none; }
+}
 
 @keyframes contentShow {
     from {
