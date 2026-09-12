@@ -2,11 +2,12 @@ import * as Dialog from '@radix-ui/react-dialog'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { useTranslation } from 'react-i18next'
 import { archiveConversation, deleteConversation, fetchAllConversations, fetchConversation, fetchConversationsPage, fetchProjects, probeApi } from '../api'
-import { EXPORT_OPERATION_BATCH } from '../constants'
+import { EXPORT_OPERATION_BATCH, KEY_EXPORTED_UPDATE_TIMES } from '../constants'
 import { exportAllToHtml } from '../exporter/html'
 import { exportAllToJson, exportAllToOfficialJson } from '../exporter/json'
 import { exportAllToMarkdown } from '../exporter/markdown'
 import { RequestQueue } from '../utils/queue'
+import { ScriptStorage } from '../utils/storage'
 import { sleep } from '../utils/utils'
 import { CheckBox } from './CheckBox'
 import { IconCross, IconLoading, IconUpload } from './Icons'
@@ -54,6 +55,24 @@ function formatConvDate(time: number | string | undefined): string {
     if (diffDays === 1) return 'Yesterday'
     // Always show the year so "Jun 17" vs "Jun 17, 2025" confusion is impossible
     return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+/** Read the persisted per-conversation last-exported update_time map (conversation id → ms). */
+function getExportedUpdateTimes(): Record<string, number> {
+    const stored = ScriptStorage.get<Record<string, number>>(KEY_EXPORTED_UPDATE_TIMES)
+    if (stored && typeof stored === 'object') return stored
+    return {}
+}
+
+/** Persist the last-exported update_time for conversations that were actually exported successfully. */
+function markExported(conversations: { id: string; update_time?: number | string }[]): void {
+    if (conversations.length === 0) return
+    const map = getExportedUpdateTimes()
+    for (const c of conversations) {
+        const ms = toMs(c.update_time)
+        if (ms > (map[c.id] ?? 0)) map[c.id] = ms
+    }
+    ScriptStorage.set(KEY_EXPORTED_UPDATE_TIMES, map)
 }
 
 /** Text search supporting * and ? wildcards. Falls back to substring. */
@@ -139,7 +158,6 @@ const ConversationSelect: FC<ConversationSelectProps> = ({
     const { t } = useTranslation()
     const [query, setQuery] = useState('')
     const lastClickedIndex = useRef<number>(-1)
-    const [skipFirst, setSkipFirst] = useState(0)
     const [sortField, setSortField] = useState<'title' | 'create_time' | 'update_time'>('create_time')
     const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc')
 
@@ -162,6 +180,20 @@ const ConversationSelect: FC<ConversationSelectProps> = ({
 
     const allFilteredSelected = filtered.length > 0 && filtered.every(c => selected.some(x => x.id === c.id))
 
+    const selectByExportStatus = useCallback((status: 'all' | 'not_exported' | 'updated') => {
+        lastClickedIndex.current = -1
+        const exportedMap = getExportedUpdateTimes()
+        if (status === 'all') {
+            setSelected(filtered)
+        }
+        else if (status === 'not_exported') {
+            setSelected(filtered.filter(c => !(c.id in exportedMap)))
+        }
+        else {
+            setSelected(filtered.filter(c => c.id in exportedMap && exportedMap[c.id] < toMs(c.update_time)))
+        }
+    }, [filtered, setSelected])
+
     return (
         <>
             {/* ── Search input ── */}
@@ -178,7 +210,7 @@ const ConversationSelect: FC<ConversationSelectProps> = ({
                 }}
             />
 
-            {/* ── Toolbar: select-all + last-100 + resume + counter ── */}
+            {/* ── Toolbar: select-all + status select + hint + counter ── */}
             <div className="SelectToolbar">
                 <CheckBox
                     label={t('Select All')}
@@ -189,48 +221,41 @@ const ConversationSelect: FC<ConversationSelectProps> = ({
                         setSelected(checked ? filtered : [])
                     }}
                 />
-                <div className="flex items-center gap-2 ml-auto flex-wrap">
+                {/* min-w-0 lets the shrinkable items (hint first, then the loading
+                    indicator) truncate instead of the whole row wrapping */}
+                <div className="flex items-center gap-2 ml-auto min-w-0">
                     {loading && conversations.length > 0 && (
-                        <span className="flex items-center gap-1 text-sm text-gray-500 dark:text-gray-400">
+                        <span className="flex items-center gap-1 truncate min-w-0 text-sm text-gray-500 dark:text-gray-400">
                             <IconLoading className="w-3 h-3" />
                             {t('Loading')}... ({conversations.length})
                         </span>
                     )}
-                    <button
-                        className="Button neutral"
-                        disabled={disabled || conversations.length === 0}
-                        onClick={() => setSelected(filtered.slice(0, EXPORT_OPERATION_BATCH))}
-                    >
-                        {t('Last 100')}
-                    </button>
-                    {/* Resume control: select the next 100 starting at a given offset */}
-                    <input
-                        type="number"
-                        min="0"
-                        step="100"
-                        value={skipFirst}
-                        title="Starting position for next batch (e.g. 200 to resume after 2 batches)"
-                        disabled={disabled || conversations.length === 0}
-                        onChange={e => setSkipFirst(Math.max(0, Math.floor(Number(e.currentTarget.value))))}
-                        style={{
-                            width: '4rem',
-                            fontSize: '0.75rem',
-                            padding: '2px 5px',
-                            border: '1px solid #9ca3af',
-                            borderRadius: '3px',
-                            background: 'transparent',
-                            color: 'inherit',
+                    <select
+                        className="Select shrink-0"
+                        // Fixed width: only the placeholder is ever shown collapsed, and
+                        // without it the control sizes itself to the longest option,
+                        // which overflows the toolbar in verbose locales. The 2rem right
+                        // padding keeps the placeholder off the dropdown chevron.
+                        style={{ fontSize: '0.75rem', padding: '2px 2rem 2px 0.5rem', width: '8.5rem', textOverflow: 'ellipsis' }}
+                        disabled={disabled || filtered.length === 0}
+                        value=""
+                        title="Select conversations by export status"
+                        onChange={(e) => {
+                            const val = e.currentTarget.value
+                            if (val) selectByExportStatus(val as 'all' | 'not_exported' | 'updated')
                         }}
-                    />
-                    <button
-                        className="Button neutral"
-                        title={`Select 100 conversations starting at position #${skipFirst + 1}`}
-                        disabled={disabled || conversations.length === 0 || skipFirst >= filtered.length}
-                        onClick={() => setSelected(filtered.slice(skipFirst, skipFirst + EXPORT_OPERATION_BATCH))}
                     >
-                        → 100
-                    </button>
-                    <span className="text-sm font-medium tabular-nums text-gray-500 dark:text-gray-400">
+                        <option value="" disabled>{t('Select...')}</option>
+                        <option value="all">{t('Select All')}</option>
+                        <option value="not_exported">{t('Select Not Exported')}</option>
+                        <option value="updated">{t('Select Updated')}</option>
+                    </select>
+                    {/* Highest shrink factor: the hint collapses before the
+                        loading indicator starts truncating */}
+                    <span className="truncate min-w-0 text-xs text-gray-400 dark:text-gray-500" style={{ flexShrink: 99 }}>
+                        {t('Shift Select Hint')}
+                    </span>
+                    <span className="whitespace-nowrap shrink-0 text-sm font-medium tabular-nums text-gray-500 dark:text-gray-400">
                         {selected.length} / {filtered.length}
                     </span>
                 </div>
@@ -443,7 +468,9 @@ const DialogContent: FC<DialogContentProps> = ({ format }) => {
                 batchIndex: batchIndexRef.current,
                 totalBatches: totalBatchesRef.current,
                 completed: batchIndexRef.current * EXPORT_OPERATION_BATCH + prog.completed,
-                total: totalBatchesRef.current * EXPORT_OPERATION_BATCH,
+                // Every batch except the last is full, so sum the real sizes
+                // instead of assuming totalBatches * 100
+                total: pendingBatchesRef.current.reduce((n, batch) => n + batch.length, 0),
             })
         })
         return () => off()
@@ -478,8 +505,10 @@ const DialogContent: FC<DialogContentProps> = ({ format }) => {
             const totalBatches = totalBatchesRef.current
             const partIndex = batchIdx + 1
             const callback = exportAllOptions.find(o => o.label === exportType)?.callback
-            if (callback) {
+            if (callback && results.length > 0) {
                 await callback(format, results, metaList, selectedProject?.display.name, partIndex, totalBatches)
+                // Only conversations that were actually exported successfully get recorded
+                markExported(results)
             }
             if (partIndex < totalBatches) {
                 await sleep(400)
@@ -550,6 +579,7 @@ const DialogContent: FC<DialogContentProps> = ({ format }) => {
         setProcessing(true)
         for (let i = 0; i < chunks.length; i++) {
             await callback(format, chunks[i], metaList, selectedProject?.display.name, i + 1, chunks.length)
+            markExported(chunks[i])
             if (i < chunks.length - 1) await sleep(400)
         }
         setProcessing(false)
@@ -804,7 +834,7 @@ const DialogContent: FC<DialogContentProps> = ({ format }) => {
                             title="Stop the export — any batches already downloaded are kept"
                             onClick={cancelExport}
                         >
-                            Cancel
+                            {t('Cancel')}
                         </button>
                     </div>
                     <div className="w-full bg-gray-200 rounded-full h-2.5 mb-4 dark:bg-gray-700">

@@ -3,7 +3,7 @@
 // @name:zh-CN         ChatGPT Exporter
 // @name:zh-TW         ChatGPT Exporter
 // @namespace          pionxzh
-// @version            2.32.3
+// @version            2.35.0
 // @author             pionxzh
 // @description        Export ChatGPT conversations with one click — backup & share effortlessly!
 // @description:zh-CN  一键导出 ChatGPT 对话，轻松备份与分享
@@ -27,7 +27,7 @@
 // @match              https://chatgpt.com/share/*
 // @match              https://chatgpt.com/share/*/continue
 // @require            https://cdn.jsdelivr.net/npm/jszip@3.9.1/dist/jszip.min.js#sha384=QC9YCuBRpz3M81TBQGFGTrpTo2B2igltSqvOvHmbG3mb9X3Ftljj+WWRfI6VojME
-// @require            https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js#sha384=ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H
+// @require            https://cdn.jsdelivr.net/npm/@zumer/snapdom@2.24.10/dist/snapdom.js#sha384=9Xe4na0WYBrYv1WaeAW9IjFnQ88uB5RQLbKcRn3GxKYfr+rqpkwU9q7JV6gw9e4p
 // @grant              GM_deleteValue
 // @grant              GM_getValue
 // @grant              GM_setValue
@@ -126,6 +126,12 @@ html {
     --ce-border-light: var(--border-default, rgba(255, 255, 255, .15));
 }
 
+/* Define our own background in both themes \u2014 this used to lean on
+   ChatGPT's bg-menu utility class, which no longer paints one */
+.bg-menu {
+    background-color: var(--ce-menu-primary);
+}
+
 .dark .bg-menu {
     background-color: var(--ce-menu-primary);
 }
@@ -176,6 +182,14 @@ html {
 .ce-card {
     border-radius: 1rem;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+/* ChatGPT's main column carries its own z-index, which beats the menu's
+   portalled Radix popper wrapper (position: fixed, z-index: auto). Raise
+   only OUR wrapper \u2014 :has keeps ChatGPT's own Radix poppers untouched \u2014
+   and stay below the dialogs at 1000/1001. */
+[data-radix-popper-content-wrapper]:has(.ce-card) {
+    z-index: 999 !important;
 }
 
 .dark .ce-card {
@@ -476,10 +490,19 @@ html {
 .SelectToolbar {
     display: flex;
     align-items: center;
+    /* Minimum breathing room between the select-all label and the right
+       group once the ml-auto margin collapses under pressure */
+    gap: 12px;
     padding: 12px 16px;
     border-radius: 0;
     border: 1px solid #6f6e77;
     border-bottom: none;
+    flex-shrink: 0;
+}
+
+/* CJK labels wrap per-character when the row is squeezed \u2014 never shrink it */
+.SelectToolbar .CheckBoxLabel {
+    white-space: nowrap;
     flex-shrink: 0;
 }
 
@@ -595,8 +618,6 @@ html {
     .DialogContent { max-height: 90vh; }
     .SelectListHeaderCell:last-child { display: none; }
     .SelectItemMeta:last-child { display: none; }
-    .SelectToolbar .Button.neutral,
-    .SelectToolbar input[type="number"] { display: none; }
     .ActionBar { justify-content: flex-end; }
     .ActionBar > .Select { width: 100%; }
     .ActionBar > .flex-grow { display: none; }
@@ -708,6 +729,10 @@ html {
     flex-shrink: 0;
 }
 
+.min-w-0 {
+    min-width: 0;
+}
+
 .space-y-6>:not([hidden])~:not([hidden]) {
     --tw-space-y-reverse: 0;
     margin-top: calc(1.5rem * calc(1 - var(--tw-space-y-reverse)));
@@ -795,7 +820,7 @@ html {
     color: rgb(71 85 105);
 } `);
 
-(function (JSZip, html2canvas) {
+(function (JSZip, snapdom) {
   'use strict';
 
   var __defProp = Object.defineProperty;
@@ -1261,6 +1286,7 @@ html {
   const KEY_THINKING_ENABLED = "exporter:enable_thinking";
   const KEY_SOURCES_ENABLED = "exporter:enable_sources";
   const KEY_EXPORT_ALL_LIMIT = "exporter:export_all_limit";
+  const KEY_EXPORTED_UPDATE_TIMES = "exporter:exported_update_times";
   const KEY_OAI_LOCALE = "oai/apps/locale";
   const EXPORT_OPERATION_BATCH = 100;
   var _GM_deleteValue = /* @__PURE__ */ (() => typeof GM_deleteValue != "undefined" ? GM_deleteValue : void 0)();
@@ -1289,6 +1315,9 @@ html {
     if (match) return match[1];
     return null;
   }
+  function isTemporaryChat() {
+    return new URLSearchParams(location.search).get("temporary-chat") === "true";
+  }
   function isSharePage() {
     return location.pathname.startsWith("/share") && !location.pathname.endsWith("/continue");
   }
@@ -1312,6 +1341,92 @@ html {
   }
   function checkIfConversationStarted() {
     return !!document.querySelector('[data-testid^="conversation-turn-"]');
+  }
+  const CONVERSATION_STREAM_PATH = "/backend-api/f/conversation";
+  const DATA_PREFIX = "data:";
+  const MAX_SCAN_LENGTH = 2e5;
+  let temporaryChatId = null;
+  function getTemporaryChatId() {
+    return temporaryChatId;
+  }
+  function checkIfTemporaryChatIsExportable() {
+    return !isTemporaryChat() || temporaryChatId !== null;
+  }
+  function watchTemporaryChatId() {
+    const originalFetch = _unsafeWindow.fetch;
+    const logObserverError = (error2) => {
+      console.error("[Exporter] Failed to observe the temporary chat response", error2);
+    };
+    const observeResponse = (response) => {
+      try {
+        if (!response.body) return;
+        readConversationId(response.clone()).catch(logObserverError);
+      } catch (error2) {
+        logObserverError(error2);
+      }
+    };
+    const ignoreFetchFailure = () => {
+    };
+    const canExportToPage = typeof exportFunction === "function";
+    const pageResponseObserver = canExportToPage ? exportFunction(observeResponse, _unsafeWindow) : observeResponse;
+    const pageFetchFailureHandler = canExportToPage ? exportFunction(ignoreFetchFailure, _unsafeWindow) : ignoreFetchFailure;
+    const patchedFetch = (input, init2) => {
+      const response = originalFetch.call(_unsafeWindow, input, init2);
+      if (isTemporaryChat()) {
+        try {
+          const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+          if (url.includes(CONVERSATION_STREAM_PATH)) {
+            response.then(pageResponseObserver, pageFetchFailureHandler);
+          }
+        } catch (error2) {
+          logObserverError(error2);
+        }
+      }
+      return response;
+    };
+    _unsafeWindow.fetch = typeof exportFunction === "function" ? exportFunction(patchedFetch, _unsafeWindow) : patchedFetch;
+  }
+  async function readConversationId(response) {
+    var _a;
+    const reader = (_a = response.body) == null ? void 0 : _a.getReader();
+    if (!reader) return;
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let scanned = 0;
+    try {
+      while (scanned < MAX_SCAN_LENGTH) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        scanned += chunk.length;
+        buffer += chunk;
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        const conversationId = findConversationId(lines);
+        if (conversationId) {
+          temporaryChatId = conversationId;
+          break;
+        }
+      }
+    } catch (error2) {
+      console.error("[Exporter] Failed to read the temporary chat id", error2);
+    } finally {
+      reader.cancel().catch(() => {
+      });
+    }
+  }
+  function findConversationId(lines) {
+    for (const line of lines) {
+      if (!line.startsWith(DATA_PREFIX)) continue;
+      const payload = line.slice(DATA_PREFIX.length).trim();
+      if (!payload || payload === "[DONE]") continue;
+      try {
+        const { conversation_id: conversationId } = JSON.parse(payload);
+        if (typeof conversationId === "string") return conversationId;
+      } catch {
+      }
+    }
+    return null;
   }
   const generateKey = (args) => JSON.stringify(args);
   function memorize(fn2) {
@@ -1337,6 +1452,11 @@ html {
   async function getCurrentChatId() {
     if (isSharePage()) {
       return `__share__${getChatIdFromUrl()}`;
+    }
+    if (isTemporaryChat()) {
+      const temporaryChatId2 = getTemporaryChatId();
+      if (!temporaryChatId2) throw new Error("No temporary chat id found.");
+      return temporaryChatId2;
     }
     const chatId = getChatIdFromUrl();
     if (chatId) return chatId;
@@ -8433,6 +8553,7 @@ html {
   const Archive$8 = "Archive";
   const Save$8 = "Save";
   const Delete$8 = "Delete";
+  const Cancel$8 = "Cancel";
   const Export$8 = "Export";
   const Loading$8 = "Loading";
   const Preview$8 = "Preview";
@@ -8452,7 +8573,12 @@ html {
     Archive: Archive$8,
     Save: Save$8,
     Delete: Delete$8,
+    Cancel: Cancel$8,
     "Select All": "Select All",
+    "Select...": "Select...",
+    "Select Not Exported": "Select Not Exported",
+    "Select Updated": "Select Updated",
+    "Shift Select Hint": "Tip: Shift+click to select a range",
     Export: Export$8,
     "Error": "Error",
     Loading: Loading$8,
@@ -8484,29 +8610,14 @@ html {
     "Conversation Delete Alert": "Are you sure you want to delete all selected conversations?",
     "Conversation Deleted Message": "All selected conversations have been deleted. Please refresh the page to see the changes.",
     "Please start a conversation first": "Please start a conversation first.",
+    "Temporary chat could not be captured": "This temporary chat could not be read. It may have started before the exporter was loaded. You can still export it as a PNG screenshot.",
     "Select Project": "Select Project",
     "(no project)": "(no project)",
     "Export All Limit": "Export All Limit",
     "Export All Limit Description": "Set the maximum number of conversations to load. Exports run in waves of 100 conversations to stay within API rate limits.",
     "Select a source to load conversations": "Select a project above to load conversations.",
     Search: Search$8,
-    "Last 100": "Last 100",
     "No results": "No results",
-    "Date From": "From",
-    "Date To": "To",
-    "Date Filter Label": "Date",
-    "Date Filter Hint": "Filters by the chosen timestamp field. Leave blank for no date restriction.",
-    "Date Filter Field Created": "Created",
-    "Date Filter Field Updated": "Updated",
-    "Date Preset 7d": "7d",
-    "Date Preset 30d": "30d",
-    "Date Preset 90d": "90d",
-    "Date Preset Year": "This year",
-    "Clear filter": "Clear",
-    "Selected count": "{{count}} selected",
-    "Export batch info": "Exports in batches of 100 per download",
-    "Exporting batch": "Exporting batch {{current}} of {{total}}",
-    "Export batches button": "Export ({{n}} downloads)",
     "Batch progress": "Batch {{current}}/{{total}}",
     "All conversations": "All conversations",
     "Load more conversations": "Load {{n}} more",
@@ -8516,12 +8627,13 @@ html {
   const ExportHelper$7 = "Exportar";
   const Setting$7 = "Ajustes";
   const Language$7 = "Idioma";
-  const Screenshot$7 = "Captura De Pantalla";
+  const Screenshot$7 = "Captura";
   const Markdown$7 = "Markdown";
   const HTML$7 = "HTML";
   const Archive$7 = "Archivo";
   const Save$7 = "Guardar";
   const Delete$7 = "Borrar";
+  const Cancel$7 = "Cancelar";
   const Export$7 = "Exportar";
   const Loading$7 = "Cargando";
   const Preview$7 = "Previsualizar";
@@ -8541,7 +8653,12 @@ html {
     Archive: Archive$7,
     Save: Save$7,
     Delete: Delete$7,
+    Cancel: Cancel$7,
     "Select All": "Seleccionar Todos",
+    "Select...": "Selección…",
+    "Select Not Exported": "Seleccionar conversaciones no exportadas",
+    "Select Updated": "Seleccionar conversaciones actualizadas",
+    "Shift Select Hint": "Consejo: Shift+clic para seleccionar un rango",
     Export: Export$7,
     "Error": "Error",
     Loading: Loading$7,
@@ -8573,25 +8690,30 @@ html {
     "Conversation Delete Alert": "¿Estás seguro que quieres borrar todas las conversaciones seleccionadas?",
     "Conversation Deleted Message": "Todos las conversaciones seleccionadas se han borrado. Por favor refresca la página para ver los cambios.",
     "Please start a conversation first": "Por favor empieza una conversación antes.",
+    "Temporary chat could not be captured": "No se pudo leer este chat temporal. Es posible que haya comenzado antes de que se cargara el exportador. Aún puedes exportarlo como una captura de pantalla PNG.",
     "Select Project": "Seleccionar proyecto",
     "(no project)": "(sin proyecto)",
     "Export All Limit": "Límite de Exportar Todos",
     "Export All Limit Description": "Establece el número máximo de conversaciones a cargar en el diálogo 'Exportar Todos'.",
     "Select a source to load conversations": "Selecciona un proyecto arriba para cargar conversaciones.",
     Search: Search$7,
-    "Last 100": "Últimas 100",
-    "No results": "Sin resultados"
+    "No results": "Sin resultados",
+    "Batch progress": "Lote {{current}}/{{total}}",
+    "All conversations": "Todas las conversaciones",
+    "Load more conversations": "Cargar {{n}} más",
+    "Load more conversations remaining": "Cargar {{n}} más · quedan {{remaining}}"
   };
   const title$6 = "Exportateur ChatGPT";
   const ExportHelper$6 = "Exporter";
   const Setting$6 = "Paramètre";
   const Language$6 = "Langue";
-  const Screenshot$6 = "Capture d'écran";
+  const Screenshot$6 = "Capture";
   const Markdown$6 = "Markdown";
   const HTML$6 = "HTML";
   const Archive$6 = "Archiver";
   const Save$6 = "Enregistrer";
   const Delete$6 = "Supprimer";
+  const Cancel$6 = "Annuler";
   const Export$6 = "Exporter";
   const Loading$6 = "Chargement";
   const Preview$6 = "Aperçu";
@@ -8611,7 +8733,12 @@ html {
     Archive: Archive$6,
     Save: Save$6,
     Delete: Delete$6,
+    Cancel: Cancel$6,
     "Select All": "Tout sélectionner",
+    "Select...": "Sélection…",
+    "Select Not Exported": "Sélectionner les conversations non exportées",
+    "Select Updated": "Sélectionner les conversations mises à jour",
+    "Shift Select Hint": "Astuce : Maj+clic pour sélectionner une plage",
     Export: Export$6,
     "Error": "Erreur",
     Loading: Loading$6,
@@ -8643,25 +8770,30 @@ html {
     "Conversation Delete Alert": "Êtes-vous sûr de vouloir supprimer toutes les conversations sélectionnées ?",
     "Conversation Deleted Message": "Toutes les conversations sélectionnées ont été supprimées. Veuillez actualiser la page pour voir les changements.",
     "Please start a conversation first": "Veuillez commencer une conversation d'abord.",
+    "Temporary chat could not be captured": "Ce chat éphémère n'a pas pu être lu. Il a peut-être commencé avant le chargement de l'exportateur. Vous pouvez toujours l'exporter en capture d'écran PNG.",
     "Select Project": "Sélectionner un projet",
     "(no project)": "(aucun projet)",
     "Export All Limit": "Limite d'Exportation Multiple",
     "Export All Limit Description": "Définit le nombre maximal de conversations à charger dans la boîte de dialogue 'Tout exporter'.",
     "Select a source to load conversations": "Sélectionnez un projet ci-dessus pour charger les conversations.",
     Search: Search$6,
-    "Last 100": "100 dernières",
-    "No results": "Aucun résultat"
+    "No results": "Aucun résultat",
+    "Batch progress": "Lot {{current}}/{{total}}",
+    "All conversations": "Toutes les conversations",
+    "Load more conversations": "Charger {{n}} de plus",
+    "Load more conversations remaining": "Charger {{n}} de plus · {{remaining}} restantes"
   };
   const title$5 = "ChatGPT Exporter";
   const ExportHelper$5 = "Ekspor";
   const Setting$5 = "Pengaturan";
   const Language$5 = "Bahasa";
-  const Screenshot$5 = "Tangkapan Layar";
+  const Screenshot$5 = "Screenshot";
   const Markdown$5 = "Markdown";
   const HTML$5 = "HTML";
   const Archive$5 = "Arsip";
   const Save$5 = "Simpan";
   const Delete$5 = "Hapus";
+  const Cancel$5 = "Batal";
   const Export$5 = "Ekspor";
   const Loading$5 = "Memuat";
   const Preview$5 = "Pratinjau";
@@ -8681,7 +8813,12 @@ html {
     Archive: Archive$5,
     Save: Save$5,
     Delete: Delete$5,
+    Cancel: Cancel$5,
     "Select All": "Pilih Semua",
+    "Select...": "Pilih massal…",
+    "Select Not Exported": "Pilih percakapan yang belum diekspor",
+    "Select Updated": "Pilih percakapan yang diperbarui",
+    "Shift Select Hint": "Tips: Shift+klik untuk memilih rentang",
     Export: Export$5,
     "Error": "Kesalahan",
     Loading: Loading$5,
@@ -8713,14 +8850,18 @@ html {
     "Conversation Delete Alert": "Apakah Anda yakin ingin menghapus semua percakapan yang dipilih?",
     "Conversation Deleted Message": "Semua percakapan yang dipilih telah dihapus. Harap segarkan halaman untuk melihat perubahan.",
     "Please start a conversation first": "Harap mulai percakapan terlebih dahulu.",
+    "Temporary chat could not be captured": "Obrolan sementara ini tidak dapat dibaca. Mungkin obrolan dimulai sebelum pengekspor dimuat. Anda masih dapat mengekspornya sebagai tangkapan layar PNG.",
     "Select Project": "Pilih Proyek",
     "(no project)": "(tidak ada proyek)",
     "Export All Limit": "Batas Ekspor Semua",
     "Export All Limit Description": "Atur jumlah maksimum percakapan yang akan dimuat dalam dialog 'Ekspor Semua'.",
     "Select a source to load conversations": "Pilih proyek di atas untuk memuat percakapan.",
     Search: Search$5,
-    "Last 100": "100 Terakhir",
-    "No results": "Tidak ada hasil"
+    "No results": "Tidak ada hasil",
+    "Batch progress": "Kelompok {{current}}/{{total}}",
+    "All conversations": "Semua percakapan",
+    "Load more conversations": "Muat {{n}} lagi",
+    "Load more conversations remaining": "Muat {{n}} lagi · tersisa {{remaining}}"
   };
   const title$4 = "ChatGPTエクスポーター";
   const ExportHelper$4 = "エクスポート";
@@ -8732,6 +8873,7 @@ html {
   const Archive$4 = "アーカイブ";
   const Save$4 = "保存";
   const Delete$4 = "削除";
+  const Cancel$4 = "キャンセル";
   const Export$4 = "エクスポート";
   const Loading$4 = "読み込み中";
   const Preview$4 = "プレビュー";
@@ -8751,7 +8893,12 @@ html {
     Archive: Archive$4,
     Save: Save$4,
     Delete: Delete$4,
+    Cancel: Cancel$4,
     "Select All": "すべて選択",
+    "Select...": "一括選択…",
+    "Select Not Exported": "未エクスポートの会話を選択",
+    "Select Updated": "更新された会話を選択",
+    "Shift Select Hint": "ヒント: Shift+クリックで範囲選択",
     Export: Export$4,
     "Error": "エラー",
     Loading: Loading$4,
@@ -8783,14 +8930,18 @@ html {
     "Conversation Delete Alert": "選択したすべての会話を削除してもよろしいですか？",
     "Conversation Deleted Message": "選択したすべての会話が削除されました。変更を表示するには、ページを更新してください。",
     "Please start a conversation first": "まず会話を開始してください。",
+    "Temporary chat could not be captured": "この一時チャットを読み取れませんでした。エクスポーターが読み込まれる前に開始された可能性があります。PNG スクリーンショットとしてエクスポートすることは可能です。",
     "Select Project": "プロジェクトを選択",
     "(no project)": "（プロジェクトなし）",
     "Export All Limit": "すべてエクスポートの上限",
     "Export All Limit Description": "「すべてエクスポート」ダイアログで読み込む会話の最大数を設定します。",
     "Select a source to load conversations": "上からプロジェクトを選択して会話を読み込んでください。",
     Search: Search$4,
-    "Last 100": "最新100件",
-    "No results": "結果なし"
+    "No results": "結果なし",
+    "Batch progress": "バッチ {{current}}/{{total}}",
+    "All conversations": "すべての会話",
+    "Load more conversations": "さらに {{n}} 件読み込む",
+    "Load more conversations remaining": "さらに {{n}} 件読み込む · 残り {{remaining}} 件"
   };
   const title$3 = "ChatGPT Exporter";
   const ExportHelper$3 = "Export";
@@ -8802,6 +8953,7 @@ html {
   const Archive$3 = "Архивировать";
   const Save$3 = "Сохранить";
   const Delete$3 = "Удалить";
+  const Cancel$3 = "Отмена";
   const Export$3 = "Экспорт";
   const Loading$3 = "Загрузка";
   const Preview$3 = "Предпросмотр";
@@ -8821,7 +8973,12 @@ html {
     Archive: Archive$3,
     Save: Save$3,
     Delete: Delete$3,
+    Cancel: Cancel$3,
     "Select All": "Выбрать все",
+    "Select...": "Выбрать…",
+    "Select Not Exported": "Выбрать неэкспортированные разговоры",
+    "Select Updated": "Выбрать обновлённые разговоры",
+    "Shift Select Hint": "Совет: Shift+клик выбирает диапазон",
     Export: Export$3,
     "Error": "Ошибка",
     Loading: Loading$3,
@@ -8853,14 +9010,18 @@ html {
     "Conversation Delete Alert": "Вы уверены, что хотите удалить все выбранные разговоры?",
     "Conversation Deleted Message": "Все выбранные разговоры были удалены. Пожалуйста, обновите страницу, чтобы увидеть изменения.",
     "Please start a conversation first": "Пожалуйста, начните разговор первым.",
+    "Temporary chat could not be captured": "Не удалось прочитать этот временный чат. Возможно, он был начат до загрузки экспортёра. Вы всё ещё можете экспортировать его как PNG-скриншот.",
     "Select Project": "Выберите проект",
     "(no project)": "(нет проекта)",
     "Export All Limit": "Лимит экспорта всех",
     "Export All Limit Description": "Установите максимальное количество бесед для загрузки в диалоге 'Экспортировать все'.",
     "Select a source to load conversations": "Выберите проект выше, чтобы загрузить беседы.",
     Search: Search$3,
-    "Last 100": "Последние 100",
-    "No results": "Нет результатов"
+    "No results": "Нет результатов",
+    "Batch progress": "Партия {{current}}/{{total}}",
+    "All conversations": "Все разговоры",
+    "Load more conversations": "Загрузить ещё {{n}}",
+    "Load more conversations remaining": "Загрузить ещё {{n}} · осталось {{remaining}}"
   };
   const title$2 = "ChatGPT Exporter";
   const ExportHelper$2 = "Dışa Aktar";
@@ -8872,6 +9033,7 @@ html {
   const Archive$2 = "Arşiv";
   const Save$2 = "Kaydet";
   const Delete$2 = "Sil";
+  const Cancel$2 = "İptal";
   const Export$2 = "Dışa Aktar";
   const Loading$2 = "Yükleniyor";
   const Preview$2 = "Önizleme";
@@ -8891,7 +9053,12 @@ html {
     Archive: Archive$2,
     Save: Save$2,
     Delete: Delete$2,
+    Cancel: Cancel$2,
     "Select All": "Tümünü Seç",
+    "Select...": "Toplu seçim…",
+    "Select Not Exported": "Dışa aktarılmamış konuşmaları seç",
+    "Select Updated": "Güncellenen konuşmaları seç",
+    "Shift Select Hint": "İpucu: Aralık seçmek için Shift+tık",
     Export: Export$2,
     "Error": "Hata",
     Loading: Loading$2,
@@ -8923,14 +9090,18 @@ html {
     "Conversation Delete Alert": "Seçilen tüm konuşmaları silmek istediğinizden emin misiniz?",
     "Conversation Deleted Message": "Seçilen tüm konuşmalar silindi. Değişiklikleri görmek için sayfayı yenileyin.",
     "Please start a conversation first": "Lütfen önce bir konuşma başlatın.",
+    "Temporary chat could not be captured": "Bu geçici sohbet okunamadı. Dışa aktarıcı yüklenmeden önce başlamış olabilir. Yine de PNG ekran görüntüsü olarak dışa aktarabilirsiniz.",
     "Select Project": "Proje Seç",
     "(no project)": "(proje yok)",
     "Export All Limit": "Tümünü Dışa Aktarma Limiti",
     "Export All Limit Description": "'Tümünü Dışa Aktar' iletişim kutusunda yüklenecek maksimum konuşma sayısını ayarlayın.",
     "Select a source to load conversations": "Konuşmaları yüklemek için yukarıdan bir proje seçin.",
     Search: Search$2,
-    "Last 100": "Son 100",
-    "No results": "Sonuç yok"
+    "No results": "Sonuç yok",
+    "Batch progress": "Grup {{current}}/{{total}}",
+    "All conversations": "Tüm konuşmalar",
+    "Load more conversations": "{{n}} tane daha yükle",
+    "Load more conversations remaining": "{{n}} tane daha yükle · {{remaining}} kaldı"
   };
   const title$1 = "ChatGPT Exporter";
   const ExportHelper$1 = "导出助手";
@@ -8942,6 +9113,7 @@ html {
   const Archive$1 = "归档";
   const Save$1 = "保存";
   const Delete$1 = "删除";
+  const Cancel$1 = "取消";
   const Export$1 = "导出";
   const Loading$1 = "加载中";
   const Preview$1 = "预览";
@@ -8961,7 +9133,12 @@ html {
     Archive: Archive$1,
     Save: Save$1,
     Delete: Delete$1,
+    Cancel: Cancel$1,
     "Select All": "全选",
+    "Select...": "批量选择…",
+    "Select Not Exported": "选择未导出的对话",
+    "Select Updated": "选择有更新的对话",
+    "Shift Select Hint": "提示：Shift+点击可选择范围",
     Export: Export$1,
     "Error": "错误",
     Loading: Loading$1,
@@ -8993,14 +9170,18 @@ html {
     "Conversation Delete Alert": "确定要删除所有选取的对话？",
     "Conversation Deleted Message": "所有所选的对话已删除。请刷新页面。",
     "Please start a conversation first": "请先开始对话。",
+    "Temporary chat could not be captured": "无法读取此临时聊天，它可能在导出工具加载前就已开始。你仍可以将其导出为 PNG 截图。",
     "Select Project": "选择项目",
     "(no project)": "（无项目）",
     "Export All Limit": "批量导出上限",
     "Export All Limit Description": "设置“批量导出”对话框中加载的最大对话数量。",
     "Select a source to load conversations": "请在上方选择一个项目以加载对话。",
     Search: Search$1,
-    "Last 100": "最新 100 条",
-    "No results": "无结果"
+    "No results": "无结果",
+    "Batch progress": "第 {{current}}/{{total}} 批",
+    "All conversations": "全部对话",
+    "Load more conversations": "再加载 {{n}} 条",
+    "Load more conversations remaining": "再加载 {{n}} 条 · 剩余 {{remaining}} 条"
   };
   const title = "ChatGPT Exporter";
   const ExportHelper = "Export";
@@ -9012,6 +9193,7 @@ html {
   const Archive = "封存";
   const Save = "保存";
   const Delete = "刪除";
+  const Cancel = "取消";
   const Export = "匯出";
   const Loading = "載入中";
   const Preview = "預覽";
@@ -9031,7 +9213,12 @@ html {
     Archive,
     Save,
     Delete,
+    Cancel,
     "Select All": "全選",
+    "Select...": "批次選取…",
+    "Select Not Exported": "選取未匯出的對話",
+    "Select Updated": "選取有更新的對話",
+    "Shift Select Hint": "提示：Shift+點擊可選取範圍",
     Export,
     "Error": "錯誤",
     Loading,
@@ -9063,14 +9250,18 @@ html {
     "Conversation Delete Alert": "確定要刪除所有選取的對話？",
     "Conversation Deleted Message": "所有選取的對話已刪除。請重新整理頁面。",
     "Please start a conversation first": "請先開始對話。",
+    "Temporary chat could not be captured": "無法讀取此暫存對話，它可能在匯出工具載入前就已開始。你仍可以將其匯出為 PNG 截圖。",
     "Select Project": "選擇專案",
     "(no project)": "（無專案）",
     "Export All Limit": "批量匯出上限",
     "Export All Limit Description": "設定「批量匯出」對話方塊中載入的最大對話數量。",
     "Select a source to load conversations": "請在上方選擇一個專案以載入對話。",
     Search,
-    "Last 100": "最新 100 條",
-    "No results": "無結果"
+    "No results": "無結果",
+    "Batch progress": "第 {{current}}/{{total}} 批",
+    "All conversations": "全部對話",
+    "Load more conversations": "再載入 {{n}} 筆",
+    "Load more conversations remaining": "再載入 {{n}} 筆 · 剩餘 {{remaining}} 筆"
   };
   class GMStorage {
     static get(key2) {
@@ -10254,14 +10445,7 @@ ${sourceList}` : sourceList;
     document.body.appendChild(a2);
     a2.click();
     document.body.removeChild(a2);
-  }
-  function downloadUrl(filename, url) {
-    const a2 = document.createElement("a");
-    a2.href = url;
-    a2.download = filename;
-    document.body.appendChild(a2);
-    a2.click();
-    document.body.removeChild(a2);
+    setTimeout(() => URL.revokeObjectURL(url), 1e3);
   }
   function normalizeProjectName(projectName) {
     return projectName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -21421,6 +21605,10 @@ ${sourceList}` : sourceList;
       alert(instance.t("Please start a conversation first"));
       return false;
     }
+    if (!checkIfTemporaryChatIsExportable()) {
+      alert(instance.t("Temporary chat could not be captured"));
+      return false;
+    }
     const userAvatar = await getUserAvatar();
     const chatId = await getCurrentChatId();
     const rawConversation = await fetchConversation(chatId, true);
@@ -21681,8 +21869,123 @@ ${content2.text}
       this._isDisposed = true;
     }
   }
-  function fnIgnoreElements(el) {
-    return typeof el.shadowRoot === "object" && el.shadowRoot !== null;
+  const PNG_SIGNATURE = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const PNG_TYPE_IHDR = new Uint8Array([73, 72, 68, 82]);
+  const PNG_TYPE_IDAT = new Uint8Array([73, 68, 65, 84]);
+  const PNG_TYPE_IEND = new Uint8Array([73, 69, 78, 68]);
+  const ROW_CHUNK_BYTES = 256 * 1024;
+  const crcTable = new Uint32Array(256);
+  for (let index2 = 0; index2 < crcTable.length; index2++) {
+    let value = index2;
+    for (let bit = 0; bit < 8; bit++) {
+      value = value & 1 ? 3988292384 ^ value >>> 1 : value >>> 1;
+    }
+    crcTable[index2] = value >>> 0;
+  }
+  function writeUint32(target, offset, value) {
+    target[offset] = value >>> 24;
+    target[offset + 1] = value >>> 16;
+    target[offset + 2] = value >>> 8;
+    target[offset + 3] = value;
+  }
+  function pngChunk(type, data = new Uint8Array()) {
+    const chunk = new Uint8Array(12 + data.length);
+    writeUint32(chunk, 0, data.length);
+    chunk.set(type, 4);
+    chunk.set(data, 8);
+    let crc = 4294967295;
+    for (let index2 = 4; index2 < 8 + data.length; index2++) {
+      crc = crcTable[(crc ^ chunk[index2]) & 255] ^ crc >>> 8;
+    }
+    writeUint32(chunk, 8 + data.length, (crc ^ 4294967295) >>> 0);
+    return chunk;
+  }
+  function pngHeader(width, height) {
+    const data = new Uint8Array(13);
+    writeUint32(data, 0, width);
+    writeUint32(data, 4, height);
+    data[8] = 8;
+    data[9] = 6;
+    return pngChunk(PNG_TYPE_IHDR, data);
+  }
+  async function encodePng(width, renderRows) {
+    if (!Number.isInteger(width) || width <= 0) {
+      throw new RangeError("PNG width must be a positive integer");
+    }
+    if (typeof CompressionStream === "undefined") {
+      throw new TypeError("CompressionStream is not supported by this browser");
+    }
+    const compression = new CompressionStream("deflate");
+    const writer = compression.writable.getWriter();
+    const idatChunks = [];
+    const readCompressedData = (async () => {
+      const reader = compression.readable.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        idatChunks.push(pngChunk(PNG_TYPE_IDAT, value));
+      }
+    })();
+    let writtenRows = 0;
+    try {
+      await renderRows(async ({ data, width: rowWidth, height: rowCount }) => {
+        if (rowWidth !== width || data.length !== rowWidth * rowCount * 4) {
+          throw new RangeError("Invalid RGBA rows supplied to PNG encoder");
+        }
+        const rgbaStride = width * 4;
+        const pngStride = rgbaStride + 1;
+        const rowsPerWrite = Math.max(1, Math.floor(ROW_CHUNK_BYTES / pngStride));
+        for (let startRow = 0; startRow < rowCount; startRow += rowsPerWrite) {
+          const rowsInWrite = Math.min(rowsPerWrite, rowCount - startRow);
+          const filteredRows = new Uint8Array(pngStride * rowsInWrite);
+          for (let row = 0; row < rowsInWrite; row++) {
+            const sourceOffset = (startRow + row) * rgbaStride;
+            const targetOffset = row * pngStride;
+            filteredRows[targetOffset] = 0;
+            filteredRows.set(data.subarray(sourceOffset, sourceOffset + rgbaStride), targetOffset + 1);
+          }
+          await writer.write(filteredRows);
+        }
+        writtenRows += rowCount;
+      });
+      if (writtenRows === 0) throw new RangeError("PNG must contain at least one row");
+      await writer.close();
+      await readCompressedData;
+    } catch (error2) {
+      await writer.abort(error2).catch(() => {
+      });
+      await readCompressedData.catch(() => {
+      });
+      throw error2;
+    }
+    return new Blob([
+      PNG_SIGNATURE,
+      pngHeader(width, writtenRows),
+      ...idatChunks,
+      pngChunk(PNG_TYPE_IEND)
+    ], { type: "image/png" });
+  }
+  const MAX_SCREENSHOT_DIMENSION = 16e3;
+  const MAX_TILE_PIXELS = 16e6;
+  function scrollElementWithinRoot(scrollRoot, target, block) {
+    const scrollRect = scrollRoot.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const offset = targetRect.top - scrollRect.top;
+    const alignment = block === "center" ? (scrollRoot.clientHeight - targetRect.height) / 2 : 0;
+    const requestedScrollTop = Math.max(0, Math.min(
+      scrollRoot.scrollHeight - scrollRoot.clientHeight,
+      scrollRoot.scrollTop + offset - alignment
+    ));
+    scrollRoot.scrollTop = requestedScrollTop;
+    scrollRoot.dispatchEvent(new Event("scroll", { bubbles: true }));
+  }
+  function findCommonAncestor(elements) {
+    var _a;
+    let ancestor = (_a = elements[0]) == null ? void 0 : _a.parentElement;
+    while (ancestor && !elements.every((element2) => ancestor.contains(element2))) {
+      ancestor = ancestor.parentElement;
+    }
+    return ancestor;
   }
   async function exportToPng(fileNameFormat) {
     if (!checkIfConversationStarted()) {
@@ -21690,16 +21993,21 @@ ${content2.text}
       return false;
     }
     const effect = new Effect();
-    const thread = document.querySelector('#thread div:has(> [data-testid="conversation-turn-1"]');
+    const conversationTurns = Array.from(document.querySelectorAll('#thread [data-testid^="conversation-turn-"]'));
+    const thread = findCommonAncestor(conversationTurns);
     if (!thread || thread.children.length === 0 || thread.scrollHeight < 50) {
       alert(instance.t("Failed to export to PNG. Failed to find the element node."));
       return false;
     }
     const isDarkMode = document.documentElement.classList.contains("dark");
+    const threadEl = thread;
+    const turnContainers = Array.from(threadEl.querySelectorAll("[data-turn-id-container][data-is-intersecting]")).filter((element2) => !!element2.querySelector('[data-testid^="conversation-turn-"]') || element2.offsetHeight > 0 || !!element2.style.getPropertyValue("--last-known-height"));
+    const turnContainerIds = turnContainers.map((element2) => element2.dataset.turnIdContainer).filter((id) => !!id && id !== "client-created-root");
     effect.add(() => {
+      threadEl.setAttribute("data-chatgpt-exporter-screenshot-root", "");
       const style = document.createElement("style");
       style.textContent = `
-            #thread div:has(> [data-testid="conversation-turn-1"]),
+            [data-chatgpt-exporter-screenshot-root],
             #thread [data-testid^="conversation-turn-"] {
                 color: ${isDarkMode ? "#ececec" : "#0d0d0d"};
                 background-color: ${isDarkMode ? "#212121" : "#fff"};
@@ -21721,8 +22029,10 @@ ${content2.text}
 
             #page-header,
             #thread-bottom-container,
+            /* date separators such as "Yesterday 10:08 AM" */
+            [data-chatgpt-exporter-screenshot-root] [role="separator"],
             /* any other elements that are not conversation turns */
-            #thread div:has(> [data-testid="conversation-turn-1"]) > :not([data-testid^="conversation-turn-"]),
+            [data-chatgpt-exporter-screenshot-root] > :not([data-turn-id-container]):not([data-testid^="conversation-turn-"]):not(:has([data-testid^="conversation-turn-"])),
             /* hide back to top button */
             button.absolute,
             /* question button */
@@ -21730,57 +22040,203 @@ ${content2.text}
                 display: none;
             }
 
-            /* conversation action bar */
-            .group\\/conversation-turn > div > div.absolute,
+            /* Preserve the action row's spacing while hiding its toolbar. */
+            [data-testid^="conversation-turn-"] [role="group"]:has([data-testid="copy-turn-action-button"]),
             /* code block buttons */
             #thread pre button {
                 visibility: hidden;
             }
+
+            /* Later user turns currently have much larger top padding than the first one. */
+            [data-testid^="conversation-turn-"][data-turn="user"] > h4 + div {
+                padding-top: 0 !important;
+            }
             `;
-      thread.appendChild(style);
-      return () => style.remove();
+      threadEl.appendChild(style);
+      return () => {
+        style.remove();
+        threadEl.removeAttribute("data-chatgpt-exporter-screenshot-root");
+      };
     });
-    const threadEl = thread;
+    const scrollRoot = threadEl.closest("[data-scroll-root]");
+    if (scrollRoot) {
+      effect.add(() => {
+        const scrollTop = scrollRoot.scrollTop;
+        const scrollLeft = scrollRoot.scrollLeft;
+        const overflowAnchor = scrollRoot.style.overflowAnchor;
+        scrollRoot.style.overflowAnchor = "none";
+        return () => {
+          scrollRoot.style.overflowAnchor = overflowAnchor;
+          scrollRoot.scrollTop = scrollTop;
+          scrollRoot.scrollLeft = scrollLeft;
+        };
+      });
+    }
     effect.run();
-    await sleep(100);
-    const passLimit = 10;
-    const takeScreenshot = async (width, height, additionalScale = 1, currentPass = 1) => {
-      const ratio = window.devicePixelRatio || 1;
-      const scale = ratio * 2 * additionalScale;
-      let canvas = null;
+    const turnSnapshots = /* @__PURE__ */ new Map();
+    if (scrollRoot && turnContainerIds.length > 0) {
+      for (const turnContainerId of turnContainerIds) {
+        for (let pass = 0; pass < 10; pass++) {
+          const container = Array.from(threadEl.querySelectorAll("[data-turn-id-container][data-is-intersecting]")).find((element2) => element2.dataset.turnIdContainer === turnContainerId);
+          if (!container) break;
+          const renderedTurn = container.querySelector('[data-testid^="conversation-turn-"]');
+          if (renderedTurn) {
+            turnSnapshots.set(turnContainerId, container.cloneNode(true));
+            break;
+          }
+          scrollElementWithinRoot(scrollRoot, container, "center");
+          await sleep(250);
+        }
+        if (!turnSnapshots.has(turnContainerId)) {
+          const placeholder = Array.from(threadEl.querySelectorAll("[data-turn-id-container][data-is-intersecting]")).find((element2) => element2.dataset.turnIdContainer === turnContainerId);
+          if (placeholder) turnSnapshots.set(turnContainerId, placeholder.cloneNode(true));
+        }
+      }
+    } else if (scrollRoot && conversationTurns[0]) {
+      scrollElementWithinRoot(scrollRoot, conversationTurns[0], "start");
+      await sleep(250);
+    }
+    await sleep(500);
+    let screenshotEl = threadEl;
+    if (turnSnapshots.size > 0) {
+      const staticThread = threadEl.cloneNode(false);
+      staticThread.setAttribute("data-chatgpt-exporter-screenshot-root", "");
+      staticThread.style.position = "absolute";
+      staticThread.style.left = "-100000px";
+      staticThread.style.top = "0";
+      staticThread.style.width = `${threadEl.offsetWidth}px`;
+      staticThread.style.height = "auto";
+      staticThread.style.minHeight = "0";
+      staticThread.style.maxHeight = "none";
+      staticThread.style.overflow = "visible";
+      staticThread.style.pointerEvents = "none";
+      for (const turnContainerId of turnContainerIds) {
+        const snapshot = turnSnapshots.get(turnContainerId);
+        if (snapshot) staticThread.appendChild(snapshot);
+      }
+      effect.add(() => {
+        document.body.appendChild(staticThread);
+        return () => staticThread.remove();
+      });
+      effect.run();
+      screenshotEl = staticThread;
+      await sleep(100);
+    }
+    effect.add(() => {
+      const minHeight = screenshotEl.style.minHeight;
+      screenshotEl.style.minHeight = `${screenshotEl.scrollHeight}px`;
+      return () => {
+        screenshotEl.style.minHeight = minHeight;
+      };
+    });
+    effect.run();
+    await sleep(0);
+    const backgroundColor = isDarkMode ? "#212121" : "#fff";
+    const width = Math.max(screenshotEl.offsetWidth, screenshotEl.scrollWidth);
+    const height = Math.max(screenshotEl.offsetHeight, screenshotEl.scrollHeight);
+    let capture = null;
+    try {
+      capture = await snapdom.snapdom(screenshotEl, {
+        embedFonts: true,
+        backgroundColor
+      });
+    } catch (error2) {
+      console.error("Failed to capture screenshot DOM", error2);
+    }
+    const sourceWidth = (capture == null ? void 0 : capture.meta.vbW) || width;
+    const sourceHeight = (capture == null ? void 0 : capture.meta.vbH) || height;
+    const requestedScale = Math.min(2, MAX_SCREENSHOT_DIMENSION / sourceWidth);
+    const desiredWidth = Math.max(1, Math.floor(sourceWidth * requestedScale));
+    const desiredScale = desiredWidth / sourceWidth;
+    const desiredHeight = Math.max(1, Math.floor(sourceHeight * desiredScale));
+    const takeTiledScreenshot = async () => {
+      if (!capture) {
+        console.warn("[ChatGPT Exporter:screenshot] tiled capture unavailable");
+        return null;
+      }
+      if (typeof CompressionStream === "undefined") {
+        console.warn("[ChatGPT Exporter:screenshot] CompressionStream unavailable; using downscaled fallback");
+        return null;
+      }
+      const tileHeight = Math.max(1, Math.min(
+        MAX_SCREENSHOT_DIMENSION,
+        Math.floor(MAX_TILE_PIXELS / desiredWidth)
+      ));
       try {
-        canvas = await html2canvas(threadEl, {
-          scale,
-          useCORS: true,
-          scrollX: -window.scrollX,
-          scrollY: -window.scrollY,
-          windowWidth: width,
-          windowHeight: height,
-          ignoreElements: fnIgnoreElements
+        return await encodePng(desiredWidth, async (appendRows) => {
+          for (let targetY = 0; targetY < desiredHeight; targetY += tileHeight) {
+            const targetTileHeight = Math.min(tileHeight, desiredHeight - targetY);
+            const sourceY = sourceHeight * targetY / desiredHeight;
+            const sourceBottom = sourceHeight * (targetY + targetTileHeight) / desiredHeight;
+            const canvas = await capture.toCanvas({
+              crop: {
+                x: 0,
+                y: sourceY,
+                width: sourceWidth,
+                height: sourceBottom - sourceY
+              },
+              scale: desiredScale,
+              dpr: 1,
+              backgroundColor
+            });
+            if (canvas.width !== desiredWidth) {
+              throw new Error(`Unexpected screenshot tile width: ${canvas.width}`);
+            }
+            const context = canvas.getContext("2d", { willReadFrequently: true });
+            if (!context) throw new Error("Failed to read screenshot tile");
+            const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+            await appendRows(imageData);
+            canvas.width = 1;
+            canvas.height = 1;
+          }
         });
       } catch (error2) {
-        console.log(`ChatGPT Exporter:takeScreenshot with height=${height} width=${width} scale=${scale}`);
+        console.error("Failed to encode tiled screenshot", error2);
+        return null;
+      }
+    };
+    const passLimit = 10;
+    const takeDownscaledScreenshot = async (additionalScale = 1, currentPass = 1) => {
+      if (!capture) return null;
+      const scale = Math.min(
+        requestedScale,
+        MAX_SCREENSHOT_DIMENSION / sourceWidth,
+        MAX_SCREENSHOT_DIMENSION / sourceHeight
+      ) * additionalScale;
+      const targetWidth = Math.max(1, Math.floor(sourceWidth * scale));
+      const targetHeight = Math.max(1, Math.floor(sourceHeight * scale));
+      let canvas = null;
+      try {
+        canvas = await capture.toCanvas({
+          scale,
+          dpr: 1,
+          backgroundColor
+        });
+        const context = canvas.getContext("2d");
+        if (context) context.imageSmoothingEnabled = false;
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png", 1));
+        if (blob) return blob;
+      } catch (error2) {
         console.error("Failed to take screenshot", error2);
       }
-      const context = canvas == null ? void 0 : canvas.getContext("2d");
-      if (context) context.imageSmoothingEnabled = false;
-      const dataUrl2 = canvas == null ? void 0 : canvas.toDataURL("image/png", 1).replace(/^data:image\/[^;]/, "data:application/octet-stream");
-      if (!canvas || !dataUrl2 || dataUrl2 === "data:,") {
-        if (currentPass > passLimit) return null;
-        return takeScreenshot(width, height, additionalScale / 1.4, currentPass + 1);
-      }
-      return dataUrl2;
+      console.log(`ChatGPT Exporter:takeScreenshot with height=${height} width=${width} targetHeight=${targetHeight} targetWidth=${targetWidth}`);
+      if (currentPass > passLimit) return null;
+      return takeDownscaledScreenshot(additionalScale / 1.4, currentPass + 1);
     };
-    const dataUrl = await takeScreenshot(thread.scrollWidth, thread.scrollHeight);
+    const shouldTile = desiredHeight > MAX_SCREENSHOT_DIMENSION || desiredWidth * desiredHeight > MAX_SCREENSHOT_DIMENSION * MAX_SCREENSHOT_DIMENSION;
+    let png = shouldTile ? await takeTiledScreenshot() : await takeDownscaledScreenshot();
+    if (!png && shouldTile) {
+      console.warn("[ChatGPT Exporter:screenshot] tiled export failed; using downscaled fallback");
+      png = await takeDownscaledScreenshot();
+    }
     effect.dispose();
-    if (!dataUrl) {
+    if (!png) {
       alert("Failed to export to PNG. This might be caused by the size of the conversation. Please try to export a smaller conversation.");
       return false;
     }
     const chatId = getChatIdFromUrl() || void 0;
     const fileName = getFileNameWithFormat(fileNameFormat, "png", { chatId });
-    downloadUrl(fileName, dataUrl);
-    window.URL.revokeObjectURL(dataUrl);
+    downloadFile(fileName, "image/png", png);
     return true;
   }
   function convertMessageToTavern(node2) {
@@ -21865,6 +22321,10 @@ ${content2.text}
       alert(instance.t("Please start a conversation first"));
       return false;
     }
+    if (!checkIfTemporaryChatIsExportable()) {
+      alert(instance.t("Temporary chat could not be captured"));
+      return false;
+    }
     const chatId = await getCurrentChatId();
     const rawConversation = await fetchConversation(chatId, false);
     const conversation = processConversation(rawConversation);
@@ -21878,6 +22338,10 @@ ${content2.text}
       alert(instance.t("Please start a conversation first"));
       return false;
     }
+    if (!checkIfTemporaryChatIsExportable()) {
+      alert(instance.t("Temporary chat could not be captured"));
+      return false;
+    }
     const chatId = await getCurrentChatId();
     const rawConversation = await fetchConversation(chatId, false);
     const conversation = processConversation(rawConversation);
@@ -21889,6 +22353,10 @@ ${content2.text}
   async function exportToOoba(fileNameFormat) {
     if (!checkIfConversationStarted()) {
       alert(instance.t("Please start a conversation first"));
+      return false;
+    }
+    if (!checkIfTemporaryChatIsExportable()) {
+      alert(instance.t("Temporary chat could not be captured"));
       return false;
     }
     const chatId = await getCurrentChatId();
@@ -21946,6 +22414,10 @@ ${content2.text}
   async function exportToMarkdown(fileNameFormat, metaList) {
     if (!checkIfConversationStarted()) {
       alert(instance.t("Please start a conversation first"));
+      return false;
+    }
+    if (!checkIfTemporaryChatIsExportable()) {
+      alert(instance.t("Temporary chat could not be captured"));
       return false;
     }
     const chatId = await getCurrentChatId();
@@ -22178,6 +22650,10 @@ ${body2}
       alert(instance.t("Please start a conversation first"));
       return false;
     }
+    if (!checkIfTemporaryChatIsExportable()) {
+      alert(instance.t("Temporary chat could not be captured"));
+      return false;
+    }
     const chatId = await getCurrentChatId();
     const rawConversation = await fetchConversation(chatId, false);
     const { conversationNodes } = processConversation(rawConversation);
@@ -22317,8 +22793,8 @@ ${content2}`;
     } };
   }
   const MAX_RETRIES = 5;
-  const MAX_GLOBAL_PAUSES = 5;
   const DEFAULT_429_PAUSE_MS = 6e4;
+  const MAX_429_PAUSE_MS = 5 * 6e4;
   class RequestQueue {
     constructor(minBackoff, maxBackoff) {
       __publicField(this, "eventEmitter", EventEmitter());
@@ -22335,8 +22811,19 @@ ${content2}`;
        * waits out the remainder before making the next request.
        */
       __publicField(this, "pauseUntil", 0);
-      /** How many global rate-limit pauses have been applied so far */
-      __publicField(this, "globalPauses", 0);
+      /**
+       * Number of 429 pauses taken so far in this batch.
+       * Drives the exponential backoff formula. Reset to 0 by clear() at the
+       * start of each new batch so every batch gets a fresh backoff curve.
+       */
+      __publicField(this, "batchPauses", 0);
+      /**
+       * Identity of the current queue run. stop() and clear() bump it so a
+       * process() call that was suspended in an awaited sleep or request when
+       * the run was cancelled can tell, once it resumes, that it is stale and
+       * must not touch the queue state again.
+       */
+      __publicField(this, "runId", 0);
       this.minBackoff = minBackoff;
       this.maxBackoff = maxBackoff;
       this.backoff = minBackoff;
@@ -22351,16 +22838,19 @@ ${content2}`;
       }
     }
     stop() {
+      this.runId++;
+      const wasRunning = this.status === "IN_PROGRESS";
       this.status = "STOPPED";
-      this.eventEmitter.emit("done", this.results);
+      if (wasRunning) this.eventEmitter.emit("done", this.results);
     }
     clear() {
+      this.runId++;
       this.queue = [];
       this.results = [];
       this.status = "IDLE";
       this.backoff = this.minBackoff;
       this.pauseUntil = 0;
-      this.globalPauses = 0;
+      this.batchPauses = 0;
       this.total = 0;
       this.completed = 0;
     }
@@ -22376,11 +22866,13 @@ ${content2}`;
         this.done();
         return;
       }
+      const runId = this.runId;
       const remaining = this.pauseUntil - Date.now();
       if (remaining > 0) {
         const waitSecs = Math.ceil(remaining / 1e3);
         this.progress(this.queue[0].name, "rate_limited", waitSecs);
         await sleep(remaining);
+        if (runId !== this.runId) return;
         this.pauseUntil = 0;
       }
       this.status = "IN_PROGRESS";
@@ -22390,26 +22882,21 @@ ${content2}`;
       try {
         this.progress(name, "processing");
         const result = await request();
+        if (runId !== this.runId) return;
         this.results.push(result);
         this.completed++;
         this.progress(name, "processing");
         this.backoff = this.minBackoff;
         requestObject.retries = 0;
       } catch (error2) {
+        if (runId !== this.runId) return;
         if (error2 instanceof RateLimitError) {
-          this.globalPauses++;
-          if (this.globalPauses > MAX_GLOBAL_PAUSES) {
-            console.warn("[Exporter] Queue stopped: API rate limit did not clear after", MAX_GLOBAL_PAUSES, "pauses");
-            this.stop();
-            return;
-          }
-          const pauseMs = Math.max(
-            error2.retryAfterMs,
-            DEFAULT_429_PAUSE_MS * this.globalPauses
-          );
+          this.batchPauses++;
+          const backoffMs = DEFAULT_429_PAUSE_MS * 2 ** (this.batchPauses - 1);
+          const pauseMs = Math.max(error2.retryAfterMs, Math.min(MAX_429_PAUSE_MS, backoffMs));
           this.pauseUntil = Date.now() + pauseMs;
           this.progress(name, "rate_limited", Math.round(pauseMs / 1e3));
-          console.warn(`[Exporter] Rate limited (429). Pausing queue for ${Math.round(pauseMs / 1e3)}s (pause #${this.globalPauses})`);
+          console.warn(`[Exporter] Rate limited (429). Pausing ${Math.round(pauseMs / 1e3)}s (pause #${this.batchPauses} this batch)`);
           this.queue.unshift(requestObject);
           waitMs = 0;
         } else {
@@ -22427,6 +22914,7 @@ ${content2}`;
         }
       }
       await sleep(waitMs);
+      if (runId !== this.runId) return;
       this.process();
     }
     progress(name, status, rateLimitWaitSecs) {
@@ -22694,6 +23182,20 @@ ${content2}`;
     if (diffDays === 1) return "Yesterday";
     return d2.toLocaleDateString(void 0, { year: "numeric", month: "short", day: "numeric" });
   }
+  function getExportedUpdateTimes() {
+    const stored = ScriptStorage.get(KEY_EXPORTED_UPDATE_TIMES);
+    if (stored && typeof stored === "object") return stored;
+    return {};
+  }
+  function markExported(conversations) {
+    if (conversations.length === 0) return;
+    const map2 = getExportedUpdateTimes();
+    for (const c2 of conversations) {
+      const ms = toMs(c2.update_time);
+      if (ms > (map2[c2.id] ?? 0)) map2[c2.id] = ms;
+    }
+    ScriptStorage.set(KEY_EXPORTED_UPDATE_TIMES, map2);
+  }
   function textSearch(title2, query2) {
     const q2 = query2.trim();
     if (!q2) return true;
@@ -22744,7 +23246,6 @@ ${content2}`;
     const { t: t2 } = useTranslation();
     const [query2, setQuery] = h$4("");
     const lastClickedIndex = _(-1);
-    const [skipFirst, setSkipFirst] = h$4(0);
     const [sortField, setSortField] = h$4("create_time");
     const [sortDir, setSortDir] = h$4("desc");
     const filtered = F$1(() => {
@@ -22762,6 +23263,17 @@ ${content2}`;
       });
     }, [conversations, query2, sortField, sortDir]);
     const allFilteredSelected = filtered.length > 0 && filtered.every((c2) => selected.some((x2) => x2.id === c2.id));
+    const selectByExportStatus = T$4((status) => {
+      lastClickedIndex.current = -1;
+      const exportedMap = getExportedUpdateTimes();
+      if (status === "all") {
+        setSelected(filtered);
+      } else if (status === "not_exported") {
+        setSelected(filtered.filter((c2) => !(c2.id in exportedMap)));
+      } else {
+        setSelected(filtered.filter((c2) => c2.id in exportedMap && exportedMap[c2.id] < toMs(c2.update_time)));
+      }
+    }, [filtered, setSelected]);
     return /* @__PURE__ */ o$8(k$3, { children: [
       /* @__PURE__ */ o$8(
         "input",
@@ -22791,8 +23303,8 @@ ${content2}`;
             }
           }
         ),
-        /* @__PURE__ */ o$8("div", { className: "flex items-center gap-2 ml-auto flex-wrap", children: [
-          loading && conversations.length > 0 && /* @__PURE__ */ o$8("span", { className: "flex items-center gap-1 text-sm text-gray-500 dark:text-gray-400", children: [
+        /* @__PURE__ */ o$8("div", { className: "flex items-center gap-2 ml-auto min-w-0", children: [
+          loading && conversations.length > 0 && /* @__PURE__ */ o$8("span", { className: "flex items-center gap-1 truncate min-w-0 text-sm text-gray-500 dark:text-gray-400", children: [
             /* @__PURE__ */ o$8(IconLoading, { className: "w-3 h-3" }),
             t2("Loading"),
             "... (",
@@ -22800,46 +23312,27 @@ ${content2}`;
             ")"
           ] }),
           /* @__PURE__ */ o$8(
-            "button",
+            "select",
             {
-              className: "Button neutral",
-              disabled: disabled || conversations.length === 0,
-              onClick: () => setSelected(filtered.slice(0, EXPORT_OPERATION_BATCH)),
-              children: t2("Last 100")
+              className: "Select shrink-0",
+              style: { fontSize: "0.75rem", padding: "2px 2rem 2px 0.5rem", width: "8.5rem", textOverflow: "ellipsis" },
+              disabled: disabled || filtered.length === 0,
+              value: "",
+              title: "Select conversations by export status",
+              onChange: (e2) => {
+                const val = e2.currentTarget.value;
+                if (val) selectByExportStatus(val);
+              },
+              children: [
+                /* @__PURE__ */ o$8("option", { value: "", disabled: true, children: t2("Select...") }),
+                /* @__PURE__ */ o$8("option", { value: "all", children: t2("Select All") }),
+                /* @__PURE__ */ o$8("option", { value: "not_exported", children: t2("Select Not Exported") }),
+                /* @__PURE__ */ o$8("option", { value: "updated", children: t2("Select Updated") })
+              ]
             }
           ),
-          /* @__PURE__ */ o$8(
-            "input",
-            {
-              type: "number",
-              min: "0",
-              step: "100",
-              value: skipFirst,
-              title: "Starting position for next batch (e.g. 200 to resume after 2 batches)",
-              disabled: disabled || conversations.length === 0,
-              onChange: (e2) => setSkipFirst(Math.max(0, Math.floor(Number(e2.currentTarget.value)))),
-              style: {
-                width: "4rem",
-                fontSize: "0.75rem",
-                padding: "2px 5px",
-                border: "1px solid #9ca3af",
-                borderRadius: "3px",
-                background: "transparent",
-                color: "inherit"
-              }
-            }
-          ),
-          /* @__PURE__ */ o$8(
-            "button",
-            {
-              className: "Button neutral",
-              title: `Select 100 conversations starting at position #${skipFirst + 1}`,
-              disabled: disabled || conversations.length === 0 || skipFirst >= filtered.length,
-              onClick: () => setSelected(filtered.slice(skipFirst, skipFirst + EXPORT_OPERATION_BATCH)),
-              children: "→ 100"
-            }
-          ),
-          /* @__PURE__ */ o$8("span", { className: "text-sm font-medium tabular-nums text-gray-500 dark:text-gray-400", children: [
+          /* @__PURE__ */ o$8("span", { className: "truncate min-w-0 text-xs text-gray-400 dark:text-gray-500", style: { flexShrink: 99 }, children: t2("Shift Select Hint") }),
+          /* @__PURE__ */ o$8("span", { className: "whitespace-nowrap shrink-0 text-sm font-medium tabular-nums text-gray-500 dark:text-gray-400", children: [
             selected.length,
             " / ",
             filtered.length
@@ -23050,7 +23543,9 @@ ${content2}`;
           batchIndex: batchIndexRef.current,
           totalBatches: totalBatchesRef.current,
           completed: batchIndexRef.current * EXPORT_OPERATION_BATCH + prog.completed,
-          total: totalBatchesRef.current * EXPORT_OPERATION_BATCH
+          // Every batch except the last is full, so sum the real sizes
+          // instead of assuming totalBatches * 100
+          total: pendingBatchesRef.current.reduce((n2, batch) => n2 + batch.length, 0)
         });
       });
       return () => off();
@@ -23082,8 +23577,9 @@ ${content2}`;
         const totalBatches2 = totalBatchesRef.current;
         const partIndex = batchIdx + 1;
         const callback = (_a = exportAllOptions.find((o3) => o3.label === exportType)) == null ? void 0 : _a.callback;
-        if (callback) {
+        if (callback && results.length > 0) {
           await callback(format, results, metaList, selectedProject == null ? void 0 : selectedProject.display.name, partIndex, totalBatches2);
+          markExported(results);
         }
         if (partIndex < totalBatches2) {
           await sleep(400);
@@ -23149,6 +23645,7 @@ ${content2}`;
       setProcessing(true);
       for (let i2 = 0; i2 < chunks.length; i2++) {
         await callback(format, chunks[i2], metaList, selectedProject == null ? void 0 : selectedProject.display.name, i2 + 1, chunks.length);
+        markExported(chunks[i2]);
         if (i2 < chunks.length - 1) await sleep(400);
       }
       setProcessing(false);
@@ -23351,7 +23848,7 @@ ${content2}`;
               style: { fontSize: "0.75rem", padding: "3px 10px", height: "auto" },
               title: "Stop the export — any batches already downloaded are kept",
               onClick: cancelExport,
-              children: "Cancel"
+              children: t2("Cancel")
             }
           )
         ] }),
@@ -23869,219 +24366,217 @@ ${content2}`;
             /* @__PURE__ */ o$8($5d3850c4d0b4e6c7$export$c6fdb837b070b4ff, { className: "DialogOverlay" }),
             /* @__PURE__ */ o$8($5d3850c4d0b4e6c7$export$7c6e2c02157bb7d2, { className: "DialogContent", children: [
               /* @__PURE__ */ o$8($5d3850c4d0b4e6c7$export$f99233281efd08a0, { className: "DialogTitle", children: t2("Exporter Settings") }),
-              /* @__PURE__ */ o$8("div", { className: "DialogBody", children: [
-                /* @__PURE__ */ o$8("dl", { className: "space-y-6", children: [
-                  /* @__PURE__ */ o$8("div", { className: "relative flex bg-white dark:bg-white/5 rounded p-4", children: /* @__PURE__ */ o$8("div", { children: [
-                    /* @__PURE__ */ o$8("dt", { className: "text-md font-medium text-gray-800 dark:text-white", children: `${t2("Language")} 🌐` }),
-                    /* @__PURE__ */ o$8("dd", { children: /* @__PURE__ */ o$8(
-                      "select",
-                      {
-                        className: "Select mt-3",
-                        value: i18n.language,
-                        onChange: (e2) => i18n.changeLanguage(e2.currentTarget.value),
-                        children: LOCALES.map(({ name, code: code2 }) => /* @__PURE__ */ o$8("option", { value: code2, children: name }, code2))
-                      }
-                    ) })
-                  ] }) }),
-                  /* @__PURE__ */ o$8("div", { className: "relative flex bg-white dark:bg-white/5 rounded p-4", children: /* @__PURE__ */ o$8("div", { children: [
-                    /* @__PURE__ */ o$8("dt", { className: "text-md font-medium text-gray-800 dark:text-white", children: t2("File Name") }),
-                    /* @__PURE__ */ o$8("dd", { children: [
-                      /* @__PURE__ */ o$8("p", { className: "text-sm text-gray-700 dark:text-gray-300", children: [
-                        t2("Available variables"),
-                        ":",
-                        " ",
-                        /* @__PURE__ */ o$8(Variable, { name: "{title}", title: title2 }),
-                        ",",
-                        " ",
-                        /* @__PURE__ */ o$8(Variable, { name: "{date}", title: date }),
-                        ",",
-                        " ",
-                        /* @__PURE__ */ o$8(Variable, { name: "{timestamp}", title: timestamp$1 }),
-                        ",",
-                        " ",
-                        /* @__PURE__ */ o$8(Variable, { name: "{chat_id}", title: chatId }),
-                        ",",
-                        " ",
-                        /* @__PURE__ */ o$8(Variable, { name: "{create_time}", title: unixTimestampToISOString(createTime) }),
-                        ",",
-                        " ",
-                        /* @__PURE__ */ o$8(Variable, { name: "{update_time}", title: unixTimestampToISOString(updateTime) })
-                      ] }),
-                      /* @__PURE__ */ o$8("input", { className: "Input mt-4", id: "filename", value: format, onChange: (e2) => setFormat(e2.currentTarget.value) }),
-                      /* @__PURE__ */ o$8("p", { className: "mt-1 text-sm text-gray-700 dark:text-gray-300", children: [
-                        t2("Preview"),
-                        ":",
-                        " ",
-                        /* @__PURE__ */ o$8("span", { className: "select-all", style: { "text-decoration": "underline", "text-underline-offset": 4 }, children: preview })
-                      ] })
-                    ] })
-                  ] }) }),
-                  /* @__PURE__ */ o$8("div", { className: "relative flex bg-white dark:bg-white/5 rounded p-4", children: [
-                    /* @__PURE__ */ o$8("div", { children: [
-                      /* @__PURE__ */ o$8("dt", { className: "text-md font-medium text-gray-800 dark:text-white", children: t2("Export Thinking Process") }),
-                      /* @__PURE__ */ o$8("dd", { className: "text-sm text-gray-700 dark:text-gray-300", children: t2("Export Thinking Process Description") })
-                    ] }),
-                    /* @__PURE__ */ o$8("div", { className: "absolute right-4", children: /* @__PURE__ */ o$8(Toggle, { label: "", checked: enableThinking, onCheckedUpdate: setEnableThinking }) })
-                  ] }),
-                  /* @__PURE__ */ o$8("div", { className: "relative flex bg-white dark:bg-white/5 rounded p-4", children: [
-                    /* @__PURE__ */ o$8("div", { children: [
-                      /* @__PURE__ */ o$8("dt", { className: "text-md font-medium text-gray-800 dark:text-white", children: t2("Export Sources") }),
-                      /* @__PURE__ */ o$8("dd", { className: "text-sm text-gray-700 dark:text-gray-300", children: t2("Export Sources Description") })
-                    ] }),
-                    /* @__PURE__ */ o$8("div", { className: "absolute right-4", children: /* @__PURE__ */ o$8(Toggle, { label: "", checked: enableSources, onCheckedUpdate: setEnableSources }) })
-                  ] }),
-                  /* @__PURE__ */ o$8("div", { className: "relative flex bg-white dark:bg-white/5 rounded p-4", children: /* @__PURE__ */ o$8("div", { children: [
-                    /* @__PURE__ */ o$8("dt", { className: "text-md font-medium text-gray-800 dark:text-white", children: [
-                      t2("Export All Limit"),
-                      " "
-                    ] }),
-                    /* @__PURE__ */ o$8("dd", { className: "text-sm text-gray-700 dark:text-gray-300 mt-2", children: [
-                      t2("Export All Limit Description"),
+              /* @__PURE__ */ o$8("div", { className: "DialogBody", children: /* @__PURE__ */ o$8("dl", { className: "space-y-6", children: [
+                /* @__PURE__ */ o$8("div", { className: "relative flex bg-white dark:bg-white/5 rounded p-4", children: /* @__PURE__ */ o$8("div", { children: [
+                  /* @__PURE__ */ o$8("dt", { className: "text-md font-medium text-gray-800 dark:text-white", children: `${t2("Language")} 🌐` }),
+                  /* @__PURE__ */ o$8("dd", { children: /* @__PURE__ */ o$8(
+                    "select",
+                    {
+                      className: "Select mt-3",
+                      value: i18n.language,
+                      onChange: (e2) => i18n.changeLanguage(e2.currentTarget.value),
+                      children: LOCALES.map(({ name, code: code2 }) => /* @__PURE__ */ o$8("option", { value: code2, children: name }, code2))
+                    }
+                  ) })
+                ] }) }),
+                /* @__PURE__ */ o$8("div", { className: "relative flex bg-white dark:bg-white/5 rounded p-4", children: /* @__PURE__ */ o$8("div", { children: [
+                  /* @__PURE__ */ o$8("dt", { className: "text-md font-medium text-gray-800 dark:text-white", children: t2("File Name") }),
+                  /* @__PURE__ */ o$8("dd", { children: [
+                    /* @__PURE__ */ o$8("p", { className: "text-sm text-gray-700 dark:text-gray-300", children: [
+                      t2("Available variables"),
+                      ":",
                       " ",
-                      /* @__PURE__ */ o$8("div", { className: "flex items-center gap-4 mt-3", children: [
-                        /* @__PURE__ */ o$8(
-                          "input",
+                      /* @__PURE__ */ o$8(Variable, { name: "{title}", title: title2 }),
+                      ",",
+                      " ",
+                      /* @__PURE__ */ o$8(Variable, { name: "{date}", title: date }),
+                      ",",
+                      " ",
+                      /* @__PURE__ */ o$8(Variable, { name: "{timestamp}", title: timestamp$1 }),
+                      ",",
+                      " ",
+                      /* @__PURE__ */ o$8(Variable, { name: "{chat_id}", title: chatId }),
+                      ",",
+                      " ",
+                      /* @__PURE__ */ o$8(Variable, { name: "{create_time}", title: unixTimestampToISOString(createTime) }),
+                      ",",
+                      " ",
+                      /* @__PURE__ */ o$8(Variable, { name: "{update_time}", title: unixTimestampToISOString(updateTime) })
+                    ] }),
+                    /* @__PURE__ */ o$8("input", { className: "Input mt-4", id: "filename", value: format, onChange: (e2) => setFormat(e2.currentTarget.value) }),
+                    /* @__PURE__ */ o$8("p", { className: "mt-1 text-sm text-gray-700 dark:text-gray-300", children: [
+                      t2("Preview"),
+                      ":",
+                      " ",
+                      /* @__PURE__ */ o$8("span", { className: "select-all", style: { "text-decoration": "underline", "text-underline-offset": 4 }, children: preview })
+                    ] })
+                  ] })
+                ] }) }),
+                /* @__PURE__ */ o$8("div", { className: "relative flex bg-white dark:bg-white/5 rounded p-4", children: [
+                  /* @__PURE__ */ o$8("div", { children: [
+                    /* @__PURE__ */ o$8("dt", { className: "text-md font-medium text-gray-800 dark:text-white", children: t2("Export Thinking Process") }),
+                    /* @__PURE__ */ o$8("dd", { className: "text-sm text-gray-700 dark:text-gray-300", children: t2("Export Thinking Process Description") })
+                  ] }),
+                  /* @__PURE__ */ o$8("div", { className: "absolute right-4", children: /* @__PURE__ */ o$8(Toggle, { label: "", checked: enableThinking, onCheckedUpdate: setEnableThinking }) })
+                ] }),
+                /* @__PURE__ */ o$8("div", { className: "relative flex bg-white dark:bg-white/5 rounded p-4", children: [
+                  /* @__PURE__ */ o$8("div", { children: [
+                    /* @__PURE__ */ o$8("dt", { className: "text-md font-medium text-gray-800 dark:text-white", children: t2("Export Sources") }),
+                    /* @__PURE__ */ o$8("dd", { className: "text-sm text-gray-700 dark:text-gray-300", children: t2("Export Sources Description") })
+                  ] }),
+                  /* @__PURE__ */ o$8("div", { className: "absolute right-4", children: /* @__PURE__ */ o$8(Toggle, { label: "", checked: enableSources, onCheckedUpdate: setEnableSources }) })
+                ] }),
+                /* @__PURE__ */ o$8("div", { className: "relative flex bg-white dark:bg-white/5 rounded p-4", children: /* @__PURE__ */ o$8("div", { children: [
+                  /* @__PURE__ */ o$8("dt", { className: "text-md font-medium text-gray-800 dark:text-white", children: [
+                    t2("Export All Limit"),
+                    " "
+                  ] }),
+                  /* @__PURE__ */ o$8("dd", { className: "text-sm text-gray-700 dark:text-gray-300 mt-2", children: [
+                    t2("Export All Limit Description"),
+                    " ",
+                    /* @__PURE__ */ o$8("div", { className: "flex items-center gap-4 mt-3", children: [
+                      /* @__PURE__ */ o$8(
+                        "input",
+                        {
+                          type: "range",
+                          min: "100",
+                          max: "20000",
+                          step: "100",
+                          value: exportAllLimit,
+                          onChange: (e2) => setExportAllLimit(
+                            Number.parseInt(
+                              e2.currentTarget.value,
+                              10
+                            )
+                          ),
+                          className: "flex-grow h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer dark:bg-gray-700",
+                          id: "exportAllLimitSlider"
+                        }
+                      ),
+                      /* @__PURE__ */ o$8("span", { className: "font-medium text-gray-900 dark:text-gray-300 w-12 text-right", children: exportAllLimit })
+                    ] })
+                  ] })
+                ] }) }),
+                /* @__PURE__ */ o$8("div", { className: "relative flex bg-white dark:bg-white/5 rounded p-4", children: [
+                  /* @__PURE__ */ o$8("div", { children: [
+                    /* @__PURE__ */ o$8("dt", { className: "text-md font-medium text-gray-800 dark:text-white", children: t2("Conversation Timestamp") }),
+                    /* @__PURE__ */ o$8("dd", { className: "text-sm text-gray-700 dark:text-gray-300", children: [
+                      t2("Conversation Timestamp Description"),
+                      enableTimestamp && /* @__PURE__ */ o$8(k$3, { children: [
+                        /* @__PURE__ */ o$8("div", { className: "mt-2", children: /* @__PURE__ */ o$8(
+                          Toggle,
                           {
-                            type: "range",
-                            min: "100",
-                            max: "20000",
-                            step: "100",
-                            value: exportAllLimit,
-                            onChange: (e2) => setExportAllLimit(
-                              Number.parseInt(
-                                e2.currentTarget.value,
-                                10
-                              )
-                            ),
-                            className: "flex-grow h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer dark:bg-gray-700",
-                            id: "exportAllLimitSlider"
+                            label: t2("Use 24-hour format"),
+                            checked: timeStamp24H,
+                            onCheckedUpdate: setTimeStamp24H
                           }
-                        ),
-                        /* @__PURE__ */ o$8("span", { className: "font-medium text-gray-900 dark:text-gray-300 w-12 text-right", children: exportAllLimit })
+                        ) }),
+                        /* @__PURE__ */ o$8("div", { className: "mt-2", children: /* @__PURE__ */ o$8(
+                          Toggle,
+                          {
+                            label: t2("Enable on HTML"),
+                            checked: enableTimestampHTML,
+                            onCheckedUpdate: setEnableTimestampHTML
+                          }
+                        ) }),
+                        /* @__PURE__ */ o$8("div", { className: "mt-2", children: /* @__PURE__ */ o$8(
+                          Toggle,
+                          {
+                            label: t2("Enable on Markdown"),
+                            checked: enableTimestampMarkdown,
+                            onCheckedUpdate: setEnableTimestampMarkdown
+                          }
+                        ) })
                       ] })
                     ] })
-                  ] }) }),
-                  /* @__PURE__ */ o$8("div", { className: "relative flex bg-white dark:bg-white/5 rounded p-4", children: [
-                    /* @__PURE__ */ o$8("div", { children: [
-                      /* @__PURE__ */ o$8("dt", { className: "text-md font-medium text-gray-800 dark:text-white", children: t2("Conversation Timestamp") }),
-                      /* @__PURE__ */ o$8("dd", { className: "text-sm text-gray-700 dark:text-gray-300", children: [
-                        t2("Conversation Timestamp Description"),
-                        enableTimestamp && /* @__PURE__ */ o$8(k$3, { children: [
-                          /* @__PURE__ */ o$8("div", { className: "mt-2", children: /* @__PURE__ */ o$8(
-                            Toggle,
-                            {
-                              label: t2("Use 24-hour format"),
-                              checked: timeStamp24H,
-                              onCheckedUpdate: setTimeStamp24H
-                            }
-                          ) }),
-                          /* @__PURE__ */ o$8("div", { className: "mt-2", children: /* @__PURE__ */ o$8(
-                            Toggle,
-                            {
-                              label: t2("Enable on HTML"),
-                              checked: enableTimestampHTML,
-                              onCheckedUpdate: setEnableTimestampHTML
-                            }
-                          ) }),
-                          /* @__PURE__ */ o$8("div", { className: "mt-2", children: /* @__PURE__ */ o$8(
-                            Toggle,
-                            {
-                              label: t2("Enable on Markdown"),
-                              checked: enableTimestampMarkdown,
-                              onCheckedUpdate: setEnableTimestampMarkdown
-                            }
-                          ) })
-                        ] })
-                      ] })
-                    ] }),
-                    /* @__PURE__ */ o$8("div", { className: "absolute right-4", children: /* @__PURE__ */ o$8(Toggle, { label: "", checked: enableTimestamp, onCheckedUpdate: setEnableTimestamp }) })
                   ] }),
-                  /* @__PURE__ */ o$8("div", { className: "relative flex bg-white dark:bg-white/5 rounded p-4", children: [
-                    /* @__PURE__ */ o$8("div", { children: [
-                      /* @__PURE__ */ o$8("dt", { className: "text-md font-medium text-gray-800 dark:text-white", children: t2("Export Metadata") }),
-                      /* @__PURE__ */ o$8("dd", { className: "text-sm text-gray-700 dark:text-gray-300", children: [
-                        t2("Export Metadata Description"),
-                        enableMeta && /* @__PURE__ */ o$8(k$3, { children: [
-                          /* @__PURE__ */ o$8("p", { className: "mt-2 text-sm text-gray-700 dark:text-gray-300", children: [
-                            t2("Available variables"),
-                            ":",
-                            " ",
-                            /* @__PURE__ */ o$8(Variable, { name: "{title}", title: title2 }),
-                            ",",
-                            " ",
-                            /* @__PURE__ */ o$8(Variable, { name: "{date}", title: date }),
-                            ",",
-                            " ",
-                            /* @__PURE__ */ o$8(Variable, { name: "{timestamp}", title: timestamp$1 }),
-                            ",",
-                            " ",
-                            /* @__PURE__ */ o$8(Variable, { name: "{source}", title: source }),
-                            ",",
-                            " ",
-                            /* @__PURE__ */ o$8(Variable, { name: "{model}", title: "ChatGPT-3.5" }),
-                            ",",
-                            " ",
-                            /* @__PURE__ */ o$8(Variable, { name: "{model_name}", title: "text-davinci-002-render-sha" }),
-                            ",",
-                            " ",
-                            /* @__PURE__ */ o$8(Variable, { name: "{create_time}", title: "2023-04-10T21:45:35.027Z" }),
-                            ",",
-                            " ",
-                            /* @__PURE__ */ o$8(Variable, { name: "{update_time}", title: "2023-04-10T21:45:35.027Z" })
-                          ] }),
-                          exportMetaList.map((meta, i2) => /* @__PURE__ */ o$8("div", { className: "flex items-center mt-2", children: [
-                            /* @__PURE__ */ o$8(
-                              "input",
-                              {
-                                className: "Input",
-                                value: meta.name,
-                                onChange: (e2) => {
-                                  const list2 = [...exportMetaList];
-                                  list2[i2] = { ...list2[i2], name: e2.currentTarget.value };
-                                  setExportMetaList(list2);
-                                }
+                  /* @__PURE__ */ o$8("div", { className: "absolute right-4", children: /* @__PURE__ */ o$8(Toggle, { label: "", checked: enableTimestamp, onCheckedUpdate: setEnableTimestamp }) })
+                ] }),
+                /* @__PURE__ */ o$8("div", { className: "relative flex bg-white dark:bg-white/5 rounded p-4", children: [
+                  /* @__PURE__ */ o$8("div", { children: [
+                    /* @__PURE__ */ o$8("dt", { className: "text-md font-medium text-gray-800 dark:text-white", children: t2("Export Metadata") }),
+                    /* @__PURE__ */ o$8("dd", { className: "text-sm text-gray-700 dark:text-gray-300", children: [
+                      t2("Export Metadata Description"),
+                      enableMeta && /* @__PURE__ */ o$8(k$3, { children: [
+                        /* @__PURE__ */ o$8("p", { className: "mt-2 text-sm text-gray-700 dark:text-gray-300", children: [
+                          t2("Available variables"),
+                          ":",
+                          " ",
+                          /* @__PURE__ */ o$8(Variable, { name: "{title}", title: title2 }),
+                          ",",
+                          " ",
+                          /* @__PURE__ */ o$8(Variable, { name: "{date}", title: date }),
+                          ",",
+                          " ",
+                          /* @__PURE__ */ o$8(Variable, { name: "{timestamp}", title: timestamp$1 }),
+                          ",",
+                          " ",
+                          /* @__PURE__ */ o$8(Variable, { name: "{source}", title: source }),
+                          ",",
+                          " ",
+                          /* @__PURE__ */ o$8(Variable, { name: "{model}", title: "ChatGPT-3.5" }),
+                          ",",
+                          " ",
+                          /* @__PURE__ */ o$8(Variable, { name: "{model_name}", title: "text-davinci-002-render-sha" }),
+                          ",",
+                          " ",
+                          /* @__PURE__ */ o$8(Variable, { name: "{create_time}", title: "2023-04-10T21:45:35.027Z" }),
+                          ",",
+                          " ",
+                          /* @__PURE__ */ o$8(Variable, { name: "{update_time}", title: "2023-04-10T21:45:35.027Z" })
+                        ] }),
+                        exportMetaList.map((meta, i2) => /* @__PURE__ */ o$8("div", { className: "flex items-center mt-2", children: [
+                          /* @__PURE__ */ o$8(
+                            "input",
+                            {
+                              className: "Input",
+                              value: meta.name,
+                              onChange: (e2) => {
+                                const list2 = [...exportMetaList];
+                                list2[i2] = { ...list2[i2], name: e2.currentTarget.value };
+                                setExportMetaList(list2);
                               }
-                            ),
-                            /* @__PURE__ */ o$8("span", { className: "mx-2", children: "→" }),
-                            /* @__PURE__ */ o$8(
-                              "input",
-                              {
-                                className: "Input",
-                                value: meta.value,
-                                onChange: (e2) => {
-                                  const list2 = [...exportMetaList];
-                                  list2[i2] = { ...list2[i2], value: e2.currentTarget.value };
-                                  setExportMetaList(list2);
-                                }
+                            }
+                          ),
+                          /* @__PURE__ */ o$8("span", { className: "mx-2", children: "→" }),
+                          /* @__PURE__ */ o$8(
+                            "input",
+                            {
+                              className: "Input",
+                              value: meta.value,
+                              onChange: (e2) => {
+                                const list2 = [...exportMetaList];
+                                list2[i2] = { ...list2[i2], value: e2.currentTarget.value };
+                                setExportMetaList(list2);
                               }
-                            ),
-                            /* @__PURE__ */ o$8(
-                              "button",
-                              {
-                                className: "ml-2 rounded-full p-1 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition ease-in-out duration-150",
-                                "aria-label": "Remove",
-                                onClick: () => setExportMetaList(exportMetaList.filter((_24, j2) => j2 !== i2)),
-                                children: /* @__PURE__ */ o$8(IconTrash, { className: "w-4 h-4" })
-                              }
-                            )
-                          ] }, i2)),
-                          /* @__PURE__ */ o$8("div", { className: "flex justify-center items-center mt-2 pr-8", children: /* @__PURE__ */ o$8(
+                            }
+                          ),
+                          /* @__PURE__ */ o$8(
                             "button",
                             {
-                              className: "w-full border border-[#6f6e77] dark:border-gray-[#86858d] rounded-md py-2 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition ease-in-out duration-150",
-                              "aria-label": "Add",
-                              onClick: () => setExportMetaList([...exportMetaList, { name: "", value: "" }]),
-                              children: "+"
+                              className: "ml-2 rounded-full p-1 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition ease-in-out duration-150",
+                              "aria-label": "Remove",
+                              onClick: () => setExportMetaList(exportMetaList.filter((_24, j2) => j2 !== i2)),
+                              children: /* @__PURE__ */ o$8(IconTrash, { className: "w-4 h-4" })
                             }
-                          ) })
-                        ] })
+                          )
+                        ] }, i2)),
+                        /* @__PURE__ */ o$8("div", { className: "flex justify-center items-center mt-2 pr-8", children: /* @__PURE__ */ o$8(
+                          "button",
+                          {
+                            className: "w-full border border-[#6f6e77] dark:border-gray-[#86858d] rounded-md py-2 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition ease-in-out duration-150",
+                            "aria-label": "Add",
+                            onClick: () => setExportMetaList([...exportMetaList, { name: "", value: "" }]),
+                            children: "+"
+                          }
+                        ) })
                       ] })
-                    ] }),
-                    /* @__PURE__ */ o$8("div", { className: "absolute right-4", children: /* @__PURE__ */ o$8(Toggle, { label: "", checked: enableMeta, onCheckedUpdate: setEnableMeta }) })
-                  ] })
-                ] }),
-                /* @__PURE__ */ o$8("div", { className: "flex mt-6", style: { justifyContent: "flex-end" }, children: /* @__PURE__ */ o$8($5d3850c4d0b4e6c7$export$f39c2d165cd861fe, { asChild: true, children: /* @__PURE__ */ o$8("button", { className: "Button green font-bold", children: t2("Save") }) }) })
-              ] }),
+                    ] })
+                  ] }),
+                  /* @__PURE__ */ o$8("div", { className: "absolute right-4", children: /* @__PURE__ */ o$8(Toggle, { label: "", checked: enableMeta, onCheckedUpdate: setEnableMeta }) })
+                ] })
+              ] }) }),
+              /* @__PURE__ */ o$8("div", { className: "flex shrink-0 pt-4", style: { justifyContent: "flex-end" }, children: /* @__PURE__ */ o$8($5d3850c4d0b4e6c7$export$f39c2d165cd861fe, { asChild: true, children: /* @__PURE__ */ o$8("button", { className: "Button green font-bold", children: t2("Save") }) }) }),
               /* @__PURE__ */ o$8($5d3850c4d0b4e6c7$export$f39c2d165cd861fe, { asChild: true, children: /* @__PURE__ */ o$8("button", { className: "IconButton CloseButton", "aria-label": "Close", children: /* @__PURE__ */ o$8(IconCross, {}) }) })
             ] })
           ] })
@@ -24363,6 +24858,7 @@ ${content2}`;
   }
   main();
   function main() {
+    watchTemporaryChatId();
     onloadSafe(() => {
       console.log("[Exporter] Loaded");
       const styleEl = document.createElement("style");
@@ -24435,4 +24931,4 @@ ${content2}`;
     return wrapper;
   }
 
-})(JSZip, html2canvas);
+})(JSZip, window);

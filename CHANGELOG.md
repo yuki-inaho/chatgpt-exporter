@@ -1,5 +1,57 @@
 # Changelog
 
+## [2.35.0](https://github.com/pionxzh/chatgpt-exporter/compare/userscript-v2.34.1...userscript-v2.35.0) (2026-08-28)
+
+
+### Features
+
+* replace screenshot renderer with SnapDOM ([f6c38b2](https://github.com/pionxzh/chatgpt-exporter/commit/f6c38b2bb09052ad6a205df88b3e1ab04cd172a2))
+
+
+### Bug Fixes
+
+* export temporary chat response callbacks on Firefox ([66aeac8](https://github.com/pionxzh/chatgpt-exporter/commit/66aeac8008dd8b5d66c0fb3be21657c2a71d3bc8))
+* permission denied on Firefox ([87dbdf0](https://github.com/pionxzh/chatgpt-exporter/commit/87dbdf0c59c30027f959c3dc2d080efc5f21bc94))
+
+## [2.34.1](https://github.com/pionxzh/chatgpt-exporter/compare/userscript-v2.34.0...userscript-v2.34.1) (2026-08-20)
+
+
+### Bug Fixes
+
+* paint the menu background in light mode ([1388cdf](https://github.com/pionxzh/chatgpt-exporter/commit/1388cdf31aea0bfd7dbd37e57af890cff262a384))
+* pin the settings Save button below the scrollable body ([25264ad](https://github.com/pionxzh/chatgpt-exporter/commit/25264ad249315d18ddbd16d94f2cc0dc9485f174))
+* raise the export menu above ChatGPT's main column ([20e6b2e](https://github.com/pionxzh/chatgpt-exporter/commit/20e6b2ebc5f35abe5dd3719c7dbec57a9154a0cc))
+
+## [2.34.0](https://github.com/pionxzh/chatgpt-exporter/compare/userscript-v2.33.0...userscript-v2.34.0) (2026-08-20)
+
+
+### Features
+
+* **export:** select not-exported or updated conversations ([68eee3a](https://github.com/pionxzh/chatgpt-exporter/commit/68eee3a91c53a0bad818c219efe3494d342ab804))
+* replace Last 100 and offset-resume controls with a shift-select hint ([43fb9f7](https://github.com/pionxzh/chatgpt-exporter/commit/43fb9f741e3f3f56e3a52173d479c19d6e08f240))
+
+
+### Bug Fixes
+
+* add missing translations and drop unused locale keys ([a476616](https://github.com/pionxzh/chatgpt-exporter/commit/a476616ffcf3064a0e0375157e49de8cb0f710ed))
+* keep the select toolbar on one line at any width ([cc04675](https://github.com/pionxzh/chatgpt-exporter/commit/cc04675365cdd81473e021ae0ceef4c4cac59dad))
+* natural translations for the batch-select options ([25358f8](https://github.com/pionxzh/chatgpt-exporter/commit/25358f8ea9ac8c2654aaa972cba2a7ef9c37f661))
+* shorten Screenshot menu label in es/fr/id so it fits on one line ([2b7ad45](https://github.com/pionxzh/chatgpt-exporter/commit/2b7ad4511ed3b541d84c98e406eee6443e0be4da))
+* show the real selected total in the export progress instead of batches x 100 ([918e3a3](https://github.com/pionxzh/chatgpt-exporter/commit/918e3a35e108bf88ea9276fd0200f2adff2390e2))
+* stop idle queues silently on cancel and translate the Cancel button ([6136a9b](https://github.com/pionxzh/chatgpt-exporter/commit/6136a9b0a1a997ab6fa30ce2692aa017797a4c23))
+
+## [2.33.0](https://github.com/pionxzh/chatgpt-exporter/compare/userscript-v2.32.3...userscript-v2.33.0) (2026-08-18)
+
+
+### Features
+
+* export currently open temporary chats ([#375](https://github.com/pionxzh/chatgpt-exporter/issues/375)) ([c397f0d](https://github.com/pionxzh/chatgpt-exporter/commit/c397f0df530ed3ad30c7939c0febd683fc5242dd))
+
+
+### Bug Fixes
+
+* use capped exponential backoff on 429s instead of aborting mid-batch ([#367](https://github.com/pionxzh/chatgpt-exporter/issues/367)) ([544b85d](https://github.com/pionxzh/chatgpt-exporter/commit/544b85d58a51038164d6c2e6cb12714d6a343440))
+
 ## [2.32.3](https://github.com/pionxzh/chatgpt-exporter/compare/userscript-v2.32.2...userscript-v2.32.3) (2026-07-05)
 
 

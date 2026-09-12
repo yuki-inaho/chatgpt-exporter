@@ -66,7 +66,8 @@ export default defineConfig({
                 // Tampermonkey/Violentmonkey verify the `#sha384=` fragment.
                 externalGlobals: [
                     ['jszip', ['JSZip', 'https://cdn.jsdelivr.net/npm/jszip@3.9.1/dist/jszip.min.js#sha384=QC9YCuBRpz3M81TBQGFGTrpTo2B2igltSqvOvHmbG3mb9X3Ftljj+WWRfI6VojME']],
-                    ['html2canvas', ['html2canvas', 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js#sha384=ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H']],
+                    // SnapDOM's IIFE exposes its named export as window.snapdom.
+                    ['@zumer/snapdom', ['window', 'https://cdn.jsdelivr.net/npm/@zumer/snapdom@2.24.10/dist/snapdom.js#sha384=9Xe4na0WYBrYv1WaeAW9IjFnQ88uB5RQLbKcRn3GxKYfr+rqpkwU9q7JV6gw9e4p']],
                 ],
                 cssSideEffects() {
                     return (e) => {

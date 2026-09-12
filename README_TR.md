@@ -42,6 +42,8 @@
 [Install-2-image]: https://img.shields.io/badge/-Install-blue
 [Install-2-url]: https://raw.githubusercontent.com/pionxzh/chatgpt-exporter/master/dist/chatgpt.user.js
 
+> Tampermonkey için tarayıcı ayarlarınızda [`Allow User Scripts` seçeneğinin etkin olduğundan](https://www.tampermonkey.net/faq.php?q=Q209) emin olun.
+
 #
 
 [📚 Desteklenen Formatlar](#-desteklenen-formatlar) &nbsp;&nbsp;|&nbsp;&nbsp; [💡 Örnek](#-örnek) &nbsp;&nbsp;|&nbsp;&nbsp; [📤 Birden Fazla Sohbeti Dışa Aktar](#-birden-fazla-sohbeti-dışa-aktar) &nbsp;&nbsp;|&nbsp;&nbsp; [🤝 Katılım](#-katılım) &nbsp;&nbsp;|&nbsp;&nbsp; [⭐ Yıldız Geçmişi](#-y%C4%B1ld%C4%B1z-ge%C3%A7mi%C5%9Fi)
@@ -247,6 +249,10 @@ Sol alt köşedeki açılır menüden dışa aktarma formatınızı seçin. Aşa
 - **Sil** - Seçilen sohbetleri siler.
 - **Dışa Aktar** - Seçilen sohbetleri, format seçicisinden seçilen formatta dışa aktarır.
 
+## 💬 DeepSeek de mi kullanıyorsunuz?
+
+[**DeepSeek Exporter**](https://github.com/pionxzh/deepseek-exporter) projesine göz atın — aynı tek tıkla dışa aktarmayı [DeepSeek](https://chat.deepseek.com/)'e getiren kardeş proje; DeepThink akıl yürütme süreci ve web arama kaynakları dahil.
+
 ## 🤝 Katılım
 
 [CONTRIBUTING.md](./CONTRIBUTING.md) dosyasına bakın
@@ -255,6 +261,6 @@ Sol alt köşedeki açılır menüden dışa aktarma formatınızı seçin. Aşa
 
 <div align="center">
 
-<img src="https://api.star-history.com/svg?repos=pionxzh/chatgpt-exporter&type=Date" width="600" height="400" alt="Yıldız Geçmişi Grafiği" valign="middle">
+<img src="https://star-history.dera.page/svg?repos=pionxzh/chatgpt-exporter&type=Date" width="600" height="400" alt="Yıldız Geçmişi Grafiği" valign="middle">
 
 </div>

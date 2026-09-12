@@ -42,6 +42,8 @@
 [Install-2-image]: https://img.shields.io/badge/-Install-blue
 [Install-2-url]: https://raw.githubusercontent.com/pionxzh/chatgpt-exporter/master/dist/chatgpt.user.js
 
+> Pastikan [`Allow User Scripts` telah diaktifkan](https://www.tampermonkey.net/faq.php?q=Q209) di pengaturan browser Anda untuk Tampermonkey.
+
 #
 
 [📚 Format yang Didukung](#-format-yang-didukung) &nbsp;&nbsp;|&nbsp;&nbsp; [💡 Contoh](#-contoh) &nbsp;&nbsp;|&nbsp;&nbsp; [📤 Ekspor Beberapa Percakapan](#-ekspor-beberapa-percakapan) &nbsp;&nbsp;|&nbsp;&nbsp; [🤝 Kontribusi](#-kontribusi) &nbsp;&nbsp;|&nbsp;&nbsp; [⭐ Sejarah Bintang](#-sejarah-bintang)
@@ -255,6 +257,10 @@ Klik tombol untuk melakukan tindakan yang diinginkan.
 - **Hapus** - Menghapus percakapan yang dipilih.
 - **Ekspor** - Mengekspor percakapan yang dipilih dalam format yang dipilih menggunakan pemilih format.
 
+## 💬 Menggunakan DeepSeek juga?
+
+Lihat [**DeepSeek Exporter**](https://github.com/pionxzh/deepseek-exporter) — proyek saudara yang menghadirkan ekspor sekali klik yang sama untuk [DeepSeek](https://chat.deepseek.com/), termasuk proses penalaran DeepThink dan sumber pencarian web.
+
 ## 🤝 Kontribusi
 
 Lihat [CONTRIBUTING.md](./CONTRIBUTING.md)
@@ -263,6 +269,6 @@ Lihat [CONTRIBUTING.md](./CONTRIBUTING.md)
 
 <div align="center">
 
-<img src="https://api.star-history.com/svg?repos=pionxzh/chatgpt-exporter&type=Date" width="600" height="400" alt="Star History Chart" valign="middle">
+<img src="https://star-history.dera.page/svg?repos=pionxzh/chatgpt-exporter&type=Date" width="600" height="400" alt="Star History Chart" valign="middle">
 
 </div>

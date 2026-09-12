@@ -42,6 +42,8 @@ English &nbsp;&nbsp;|&nbsp;&nbsp; [Français](./README_FR.md) &nbsp;&nbsp;|&nbsp
 [Install-2-image]: https://img.shields.io/badge/-Install-blue
 [Install-2-url]: https://raw.githubusercontent.com/pionxzh/chatgpt-exporter/master/dist/chatgpt.user.js
 
+> Make sure that the [`Allow User Scripts` is enabled](https://www.tampermonkey.net/faq.php?q=Q209) in your browser settings for Tampermonkey.
+
 #
 
 [📚 Supported Formats](#-supported-formats) &nbsp;&nbsp;|&nbsp;&nbsp; [💡 Example](#-example) &nbsp;&nbsp;|&nbsp;&nbsp; [📤 Export Multiple Conversations](#-export-multiple-conversations) &nbsp;&nbsp;|&nbsp;&nbsp; [🤝 Contribution](#-contribution) &nbsp;&nbsp;|&nbsp;&nbsp; [⭐ Star History](#-star-history)
@@ -244,6 +246,10 @@ Click the button to perform the action you want.
 - **Delete** - Deletes the selected conversations.
 - **Export** - Exports the selected conversations in the format chosen using the format selector.
 
+## 💬 Using DeepSeek too?
+
+Check out [**DeepSeek Exporter**](https://github.com/pionxzh/deepseek-exporter) — the sister project that brings the same one-click export to [DeepSeek](https://chat.deepseek.com/), including DeepThink reasoning and web-search sources.
+
 ## 🤝 Contribution
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md)
@@ -252,6 +258,6 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md)
 
 <div align="center">
 
-<img src="https://api.star-history.com/svg?repos=pionxzh/chatgpt-exporter&type=Date" width="600" height="400" alt="Star History Chart" valign="middle">
+<img src="https://star-history.dera.page/svg?repos=pionxzh/chatgpt-exporter&type=Date" width="600" height="400" alt="Star History Chart" valign="middle">
 
 </div>
