@@ -6,13 +6,15 @@ import { checkIfConversationStarted } from '../page'
 import { checkIfTemporaryChatIsExportable } from '../temporaryChat'
 import { transformContentReferences } from '../utils/citations'
 import { buildZipFileName, downloadFile, getFileNameWithFormat } from '../utils/download'
+import { protectMath } from '../utils/latex'
 import { fromMarkdown, toMarkdown } from '../utils/markdown'
 import { ScriptStorage } from '../utils/storage'
 import { standardizeLineBreaks } from '../utils/text'
-import { dateStr, timestamp, unixTimestampToISOString } from '../utils/utils'
+import { transformAuthor } from '../utils/author'
 import type { ApiConversationWithId, Citation, ConversationNodeMessage, ConversationResult, ThinkingContent } from '../api'
 import type { ExportMeta } from '../ui/SettingContext'
 import type { PartInfo } from '../utils/download'
+import { getMetaVariables, resolveMetaList } from './meta'
 
 export async function exportToMarkdown(fileNameFormat: string, metaList: ExportMeta[]) {
     if (!checkIfConversationStarted()) {
@@ -76,28 +78,12 @@ export async function exportAllToMarkdown(fileNameFormat: string, apiConversatio
     return true
 }
 
-const LatexRegex = /(\s\$\$.+\$\$\s|\s\$.+\$\s|\\\[.+\\\]|\\\(.+\\\))|(^\$$[\S\s]+^\$$)|(^\$\$[\S\s]+^\$\$$)/gm
-
 function conversationToMarkdown(conversation: ConversationResult, metaList?: ExportMeta[]) {
-    const { id, title, model, modelSlug, createTime, updateTime, conversationNodes } = conversation
+    const { id, title, conversationNodes } = conversation
     const source = `${baseUrl}/c/${id}`
 
-    const _metaList = metaList
-        ?.filter(x => !!x.name)
-        .map(({ name, value }) => {
-            const val = value
-                .replace('{title}', title)
-                .replace('{date}', dateStr())
-                .replace('{timestamp}', timestamp())
-                .replace('{source}', source)
-                .replace('{model}', model)
-                .replace('{model_name}', modelSlug)
-                .replace('{create_time}', unixTimestampToISOString(createTime))
-                .replace('{update_time}', unixTimestampToISOString(updateTime))
-
-            return `${name}: ${val}`
-        })
-    ?? []
+    const _metaList = resolveMetaList(metaList, getMetaVariables(conversation, source))
+        .map(([name, val]) => `${name}: ${val}`)
     const frontMatter = _metaList.length > 0
         ? `---\n${_metaList.join('\n')}\n---\n\n`
         : ''
@@ -138,34 +124,9 @@ function conversationToMarkdown(conversation: ConversationResult, metaList?: Exp
         // Only message from assistant will be reformatted
         if (message.author.role === 'assistant') {
             postSteps.push((input) => {
-                // Replace mathematical formula annotation
-                input = input
-                    .replace(/^\\\[(.+)\\\]$/gm, '$$$$$1$$$$')
-                    .replace(/\\\[/g, '$')
-                    .replace(/\\\]/g, '$')
-                    .replace(/\\\(/g, '$')
-                    .replace(/\\\)/g, '$')
-                const matches = input.match(LatexRegex)
-                // Skip code block as the following steps can potentially break the code
-                const isCodeBlock = /```/.test(input)
-                if (!isCodeBlock && matches) {
-                    let index = 0
-                    input = input.replace(LatexRegex, () => {
-                        // Replace it with `╬${index}╬` to avoid markdown processor ruin the formula
-                        return `╬${index++}╬`
-                    })
-                }
-
-                let transformed = toMarkdown(fromMarkdown(input))
-
-                if (!isCodeBlock && matches) {
-                    // Replace `╬${index}╬` back to the original latex
-                    transformed = transformed.replace(/╬(\d+)╬/g, (_, index) => {
-                        return matches[+index]
-                    })
-                }
-
-                return transformed
+                // Keep formulas out of the markdown round trip, which would escape them
+                const { text, restore } = protectMath(input)
+                return restore(toMarkdown(fromMarkdown(text)))
             })
         }
         const postProcess = (input: string) => postSteps.reduce((acc, fn) => fn(acc), input)
@@ -177,19 +138,6 @@ function conversationToMarkdown(conversation: ConversationResult, metaList?: Exp
     const markdown = `${frontMatter}# ${title}\n\n${content}`
 
     return markdown
-}
-
-function transformAuthor(author: ConversationNodeMessage['author']): string {
-    switch (author.role) {
-        case 'assistant':
-            return 'ChatGPT'
-        case 'user':
-            return 'You'
-        case 'tool':
-            return `Plugin${author.name ? ` (${author.name})` : ''}`
-        default:
-            return author.role
-    }
 }
 
 /**
