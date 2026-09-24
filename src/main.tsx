@@ -88,11 +88,23 @@ function main() {
             const rawConversation = await fetchConversation(chatId, false)
             const { conversationNodes } = processConversation(rawConversation)
 
-            const threadContents = Array.from(document.querySelectorAll('main [data-testid^="conversation-turn-"] [data-message-id]'))
+            const threadContents = Array.from(document.querySelectorAll(
+                'main [data-testid^="conversation-turn-"] [data-message-id], main [data-chatgpt-search-message-ids]',
+            ))
             if (threadContents.length === 0) return
 
+            const createTimeByMessageId = new Map<string, number>()
+            for (const node of conversationNodes) {
+                if (node.message?.id && node.message.create_time != null) {
+                    createTimeByMessageId.set(node.message.id, node.message.create_time)
+                }
+            }
+
             threadContents.forEach((thread, index) => {
-                const createTime = conversationNodes[index]?.message?.create_time
+                const messageId = thread.getAttribute('data-message-id')
+                    ?? thread.getAttribute('data-chatgpt-search-message-ids')?.trim().split(/\s+/)[0]
+                const createTime = (messageId ? createTimeByMessageId.get(messageId) : undefined)
+                    ?? conversationNodes[index]?.message?.create_time
                 if (!createTime) return
 
                 const date = new Date(createTime * 1000)

@@ -592,7 +592,7 @@
 		return defaultAvatar;
 	}
 	function checkIfConversationStarted() {
-		return !!document.querySelector("[data-testid^=\"conversation-turn-\"]");
+		return !!document.querySelector("[data-testid^=\"conversation-turn-\"], [data-content-search-unit-key]");
 	}
 	function isCompleteConversation(conversation) {
 		return !!conversation?.mapping && !!conversation.current_node;
@@ -22388,10 +22388,13 @@
 				if (!currentChatId || currentChatId === chatId) return;
 				chatId = currentChatId;
 				const { conversationNodes } = processConversation(await fetchConversation(chatId, false));
-				const threadContents = Array.from(document.querySelectorAll("main [data-testid^=\"conversation-turn-\"] [data-message-id]"));
+				const threadContents = Array.from(document.querySelectorAll("main [data-testid^=\"conversation-turn-\"] [data-message-id], main [data-chatgpt-search-message-ids]"));
 				if (threadContents.length === 0) return;
+				const createTimeByMessageId = new Map();
+				for (const node of conversationNodes) if (node.message?.id && node.message.create_time != null) createTimeByMessageId.set(node.message.id, node.message.create_time);
 				threadContents.forEach((thread, index) => {
-					const createTime = conversationNodes[index]?.message?.create_time;
+					const messageId = thread.getAttribute("data-message-id") ?? thread.getAttribute("data-chatgpt-search-message-ids")?.trim().split(/\s+/)[0];
+					const createTime = (messageId ? createTimeByMessageId.get(messageId) : void 0) ?? conversationNodes[index]?.message?.create_time;
 					if (!createTime) return;
 					const date = new Date(createTime * 1e3);
 					const timestamp = document.createElement("time");
