@@ -9,6 +9,15 @@ import { onloadSafe } from './utils/utils'
 import './i18n'
 import './styles/missing-tailwind.css'
 
+const PROFILE_BUTTON_SELECTOR = '[data-testid="accounts-profile-button"]'
+const SIDEBAR_SCROLL_SELECTOR = '[data-app-action-sidebar-scroll]'
+const AUTOMATIONS_SELECTOR = '[data-sidebar-destination="builtin:automations"]'
+
+interface NavMenuMount {
+    target: Element
+    insert: (container: Element) => void
+}
+
 main()
 
 function main() {
@@ -26,7 +35,7 @@ function main() {
 
         const injectionMap = new Map<Element, Element>()
 
-        const injectNavMenu = (target: Element) => {
+        const injectNavMenu = ({ target, insert }: NavMenuMount) => {
             if (injectionMap.has(target)) return
 
             // eslint-disable-next-line no-console
@@ -34,24 +43,29 @@ function main() {
 
             const container = getMenuContainer()
             injectionMap.set(target, container)
-            getNavMenuInsertionTarget(target).before(container)
+            insert(container)
         }
 
-        const selector = '[data-testid="accounts-profile-button"]'
-
-        sentinel.on('selector', injectNavMenu)
-
-        setInterval(() => {
+        const syncNavMenu = () => {
+            const mounts = getNavMenuMounts()
+            const activeTargets = new Set(mounts.map(({ target }) => target))
             injectionMap.forEach((container, target) => {
-                if (!target.isConnected) {
+                if (!target.isConnected || !container.isConnected || !activeTargets.has(target)) {
                     container.remove()
                     injectionMap.delete(target)
                 }
             })
 
-            const targets = Array.from(document.querySelectorAll(selector)).filter(target => !injectionMap.has(target))
-            targets.forEach(injectNavMenu)
-        }, 1000)
+            mounts.forEach(injectNavMenu)
+        }
+
+        // Sentinel handles new sidebar nodes immediately. Polling remains as a
+        // fallback for UI variants that replace or remove injected siblings.
+        for (const selector of [PROFILE_BUTTON_SELECTOR, SIDEBAR_SCROLL_SELECTOR, AUTOMATIONS_SELECTOR]) {
+            sentinel.on(selector, syncNavMenu)
+        }
+        syncNavMenu()
+        setInterval(syncNavMenu, 1000)
 
         // Support for share page
         if (isSharePage()) {
@@ -63,6 +77,10 @@ function main() {
         /** Insert timestamp to the bottom right of each message */
         let chatId = ''
         sentinel.on('[role="presentation"]', async () => {
+            // Share pages carry a share id, not a conversation id, so the
+            // conversation API below would 404 on them.
+            if (isSharePage()) return
+
             const currentChatId = getChatIdFromUrl()
             if (!currentChatId || currentChatId === chatId) return
             chatId = currentChatId
@@ -110,4 +128,29 @@ function getNavMenuInsertionTarget(target: Element) {
     if (!wrapper || wrapper.children.length !== 1) return target
 
     return wrapper
+}
+
+function getNavMenuMounts(): NavMenuMount[] {
+    const profileButtons = Array.from(document.querySelectorAll(PROFILE_BUTTON_SELECTOR))
+    if (profileButtons.length > 0) {
+        return profileButtons.map(target => ({
+            target,
+            insert: container => getNavMenuInsertionTarget(target).before(container),
+        }))
+    }
+
+    const profileFooters = Array.from(document.querySelectorAll(SIDEBAR_SCROLL_SELECTOR))
+        .map(scrollRoot => scrollRoot.nextElementSibling)
+        .filter((footer): footer is Element => !!footer?.querySelector('button[aria-haspopup="menu"]'))
+    if (profileFooters.length > 0) {
+        return profileFooters.map(target => ({
+            target,
+            insert: container => target.prepend(container),
+        }))
+    }
+
+    return Array.from(document.querySelectorAll(AUTOMATIONS_SELECTOR)).map(target => ({
+        target,
+        insert: container => getNavMenuInsertionTarget(target).before(container),
+    }))
 }

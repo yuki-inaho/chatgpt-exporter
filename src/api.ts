@@ -1,9 +1,18 @@
-import urlcat from 'urlcat'
+import urlcatImport from 'urlcat'
 import { apiUrl, baseUrl } from './constants'
 import { getChatIdFromUrl, getConversationFromSharePage, isSharePage, isTemporaryChat } from './page'
+import { loadShareConversation } from './share'
 import { getTemporaryChatId } from './temporaryChat'
 import { blobToDataURL } from './utils/dom'
 import { memorize } from './utils/memorize'
+import { getModelName } from './utils/model'
+
+// urlcat ships CommonJS with `exports.default`. Because this package is
+// `"type": "module"`, vite 8 (rolldown) applies Node's interop and hands the
+// default import the whole `module.exports` object, so unwrap either shape.
+const urlcat: typeof urlcatImport = typeof urlcatImport === 'function'
+    ? urlcatImport
+    : (urlcatImport as unknown as { default: typeof urlcatImport }).default
 
 interface ApiSession {
     accessToken: string
@@ -25,18 +34,6 @@ interface ApiSession {
         picture: string
     }
 }
-
-type ModelSlug =
-    | 'text-davinci-002-render-sha'
-    | 'text-davinci-002-render-paid'
-    | 'text-davinci-002-browse'
-    | 'gpt-4'
-    | 'gpt-4-browsing'
-    | 'gpt-4o'
-    | 'gpt-5-t-mini'
-    | 'gpt-5-1-instant'
-    | 'gpt-5-1-thinking'
-    | 'gpt-5-2'
 
 export interface Citation {
     start_ix: number
@@ -61,6 +58,13 @@ export interface ContentReferenceSource {
     supporting_websites?: ContentReferenceSource[]
 }
 
+export interface ImageSearchResult {
+    title?: string
+    /** Page the image comes from */
+    url?: string
+    content_url?: string
+}
+
 export interface ContentReference {
     type: 'grouped_webpages' | 'sources_footnote' | 'nav_list' | 'alt_text' | 'webpage' | (string & {})
     /** The text that was matched in the content, e.g., "citeturn0search3" */
@@ -76,6 +80,10 @@ export interface ContentReference {
     fallback_items?: ContentReferenceSource[]
     safe_urls?: string[]
     refs?: string[]
+    /** File name of an uploaded file, on `file` references */
+    name?: string
+    /** Image search results, wrapped in `image_result` on `image_group` references */
+    images?: Array<ImageSearchResult & { image_result?: ImageSearchResult }>
     // Legacy fields (may still be present in some responses)
     url?: string
     title?: string
@@ -120,7 +128,7 @@ interface MessageMeta {
         type: 'stop' | 'interrupted' & (string & {})
     }
     is_complete?: boolean
-    model_slug?: ModelSlug & (string & {})
+    model_slug?: string
     parent_id?: string
     timestamp_?: 'absolute' & (string & {})
     citations?: Citation[]
@@ -129,6 +137,8 @@ interface MessageMeta {
     content_references?: ContentReference[]
     /** Whether this message is hidden in the UI (e.g., internal system prompts) */
     is_visually_hidden_from_conversation?: boolean
+    /** Whether this assistant message is a transient thinking preamble hidden from the final conversation */
+    is_thinking_preamble_message?: boolean
     /** Duration of reasoning in seconds (from reasoning_recap messages) */
     finished_duration_sec?: number
     /** Reasoning activity title shown in the thinking panel */
@@ -273,7 +283,7 @@ export interface ConversationNodeMessage {
 }
 
 export interface ThinkingContent {
-    thoughts: Array<{ summary: string; content: string }>
+    thoughts: Array<{ summary: string, content: string }>
     activities?: string[]
     durationSeconds?: number
 }
@@ -347,7 +357,7 @@ export interface ApiGizmo {
 export interface ApiProjectInfo {
     id: string
     organization_id: string
-    display: { name: string; description: string }
+    display: { name: string, description: string }
     // todo: support exporting project context
 }
 
@@ -433,6 +443,7 @@ const enum ChatGPTCookie {
 
 const sessionApi = urlcat(baseUrl, '/api/auth/session')
 const conversationApi = (id: string) => urlcat(apiUrl, '/conversation/:id', { id })
+const shareConversationApi = (id: string) => urlcat(apiUrl, '/share/:id', { id })
 const conversationsApi = (offset: number, limit: number) => urlcat(apiUrl, '/conversations', { offset, limit })
 const fileDownloadApi = (id: string) => urlcat(apiUrl, '/files/download/:id', { id, post_id: '', inline: false })
 const projectsApi = (cursor: number | null) => urlcat(apiUrl, '/gizmos/snorlax/sidebar', { conversations_per_gizmo: 0, cursor })
@@ -441,7 +452,9 @@ const accountsCheckApi = urlcat(apiUrl, '/accounts/check/v4-2023-04-27')
 
 export async function getCurrentChatId(): Promise<string> {
     if (isSharePage()) {
-        return `__share__${getChatIdFromUrl()}`
+        const shareId = getChatIdFromUrl()
+        if (!shareId) throw new Error('No share id found.')
+        return `__share__${shareId}`
     }
 
     // A temporary chat is absent from the history list and never puts its id in
@@ -484,12 +497,12 @@ async function fetchImageFromPointer(uri: string) {
 async function replaceImageAssets(conversation: ApiConversation): Promise<void> {
     const isMultiModalInputImage = (part: any): part is MultiModalInputImage => {
         return typeof part === 'object'
-        && part !== null
-        && 'content_type' in part
-        && part.content_type === 'image_asset_pointer'
-        && 'asset_pointer' in part
-        && typeof part.asset_pointer === 'string'
-        && part.asset_pointer.startsWith('sediment://')
+            && part !== null
+            && 'content_type' in part
+            && part.content_type === 'image_asset_pointer'
+            && 'asset_pointer' in part
+            && typeof part.asset_pointer === 'string'
+            && part.asset_pointer.startsWith('sediment://')
     }
 
     const imageAssets = Object.values(conversation.mapping).flatMap((node) => {
@@ -534,8 +547,11 @@ async function replaceImageAssets(conversation: ApiConversation): Promise<void> 
 export async function fetchConversation(chatId: string, shouldReplaceAssets: boolean): Promise<ApiConversationWithId> {
     if (chatId.startsWith('__share__')) {
         const id = chatId.replace('__share__', '')
-        const shareConversation = getConversationFromSharePage() as ApiConversation
-        await replaceImageAssets(shareConversation)
+        const shareConversation = await loadShareConversation(
+            getConversationFromSharePage(),
+            () => fetchApi<ApiConversation>(shareConversationApi(id)),
+        )
+        if (shouldReplaceAssets) await replaceImageAssets(shareConversation)
 
         return {
             id,
@@ -561,7 +577,7 @@ export async function fetchProjects(): Promise<ApiProjectInfo[]> {
     const allItems: ApiGizmo[] = []
     while (true) {
         const url = projectsApi(cursor)
-        const { items, cursor: nextCursor = null } = await fetchApi<{ cursor: number | null; items: ApiGizmo[] }>(url)
+        const { items, cursor: nextCursor = null } = await fetchApi<{ cursor: number | null, items: ApiGizmo[] }>(url)
         cursor = nextCursor
         allItems.push(...items)
         if (nextCursor === null) break
@@ -580,7 +596,7 @@ async function fetchConversations(offset = 0, limit = 20, project: string | null
 
 async function fetchProjectConversations(project: string, cursor: string | number = 0, limit = 20): Promise<ApiConversations> {
     const url = projectConversationsApi(project, cursor, limit)
-    const { items, cursor: nextCursor } = await fetchApi<{ items: ApiConversationItem[]; cursor: string | null }>(url)
+    const { items, cursor: nextCursor } = await fetchApi<{ items: ApiConversationItem[], cursor: string | null }>(url)
     return {
         has_missing_conversations: false,
         items,
@@ -867,6 +883,16 @@ export function shouldSkipMessageInExport(message?: ConversationNodeMessage): bo
     // Skip messages marked as visually hidden (e.g., internal system prompts)
     if (message.metadata?.is_visually_hidden_from_conversation) return true
 
+    // Skip transient assistant preambles shown while a thinking response is being prepared.
+    if (message.metadata?.is_thinking_preamble_message) return true
+
+    // Skip empty replies, such as the answer after an image generation.
+    if (
+        message.author.role === 'assistant'
+        && message.content.content_type === 'text'
+        && !message.content.parts.join('').trim()
+    ) return true
+
     // Skip tool's intermediate message.
     if (message.author.role === 'tool') {
         if (message.author.name === 'file_search') return true
@@ -888,23 +914,6 @@ export function shouldSkipMessageInExport(message?: ConversationNodeMessage): bo
     return false
 }
 
-const ModelMapping: { [key in ModelSlug]: string } & { [key: string]: string } = {
-    'text-davinci-002-render-sha': 'GPT-3.5',
-    'text-davinci-002-render-paid': 'GPT-3.5',
-    'text-davinci-002-browse': 'GPT-3.5',
-    'gpt-4-browsing': 'GPT-4 (Browser)',
-    'gpt-4o': 'GPT-4o',
-    'gpt-5-t-mini': 'GPT-5',
-    'gpt-5-1-instant': 'GPT-5.1',
-    'gpt-5-1-thinking': 'GPT-5.1',
-    'gpt-5-2': 'GPT-5.2',
-
-    // fuzzy matching
-    'gpt-4': 'GPT-4',
-    'gpt-5': 'GPT-5',
-    'text-davinci-002': 'GPT-3.5',
-}
-
 export interface ProcessConversationOptions {
     enableThinking?: boolean
 }
@@ -913,13 +922,12 @@ export function processConversation(conversation: ApiConversationWithId, options
     const title = conversation.title || 'ChatGPT Conversation'
     const createTime = conversation.create_time
     const updateTime = conversation.update_time
-    const { model, modelSlug } = extractModel(conversation.mapping)
-
     const startNodeId = conversation.current_node
         || Object.values(conversation.mapping).find(node => !node.children || node.children.length === 0)?.id
     if (!startNodeId) throw new Error('Failed to find start node.')
 
     const conversationNodes = extractConversationResult(conversation.mapping, startNodeId)
+    const { model, modelSlug } = extractModel(conversation.mapping, conversationNodes)
     const mergedConversationNodes = mergeContinuationNodes(conversationNodes)
 
     if (options?.enableThinking) {
@@ -937,24 +945,14 @@ export function processConversation(conversation: ApiConversationWithId, options
     }
 }
 
-function extractModel(conversationMapping: Record<string, ConversationNode>) {
-    let model = ''
-    const modelSlug = Object.values(conversationMapping).find(node => node.message?.metadata?.model_slug)?.message?.metadata?.model_slug || ''
-    if (modelSlug) {
-        if (ModelMapping[modelSlug]) {
-            model = ModelMapping[modelSlug]
-        }
-        else {
-            Object.keys(ModelMapping).forEach((key) => {
-                if (modelSlug.startsWith(key)) {
-                    model = key
-                }
-            })
-        }
-    }
+function extractModel(conversationMapping: Record<string, ConversationNode>, conversationNodes: ConversationNode[]) {
+    // Prefer the latest reply on the current branch, the model can change mid-conversation.
+    const node = conversationNodes.findLast(node => node.message?.metadata?.model_slug)
+        ?? Object.values(conversationMapping).find(node => node.message?.metadata?.model_slug)
+    const modelSlug = node?.message?.metadata?.model_slug ?? ''
 
     return {
-        model,
+        model: getModelName(modelSlug),
         modelSlug,
     }
 }
@@ -983,7 +981,7 @@ function extractConversationResult(conversationMapping: Record<string, Conversat
             // Skip hidden/tool-only messages that should not appear in exported output
             && !shouldSkipMessageInExport(node.message)
         ) {
-            result.unshift(node)
+            result.unshift(copyNode(node))
         }
 
         currentNodeId = node.parent
@@ -996,14 +994,37 @@ function extractConversationResult(conversationMapping: Record<string, Conversat
  * Merge continuation nodes generated by official continuation
  * to improve the readability of the conversation. (#146)
  */
+/**
+ * Copy the parts of a node that `mergeContinuationNodes` and
+ * `attachThinkingToNodes` write to, so processing leaves the raw mapping
+ * intact. The same raw conversation can be exported more than once.
+ */
+function copyNode(node: ConversationNode): ConversationNode {
+    const { message } = node
+    if (!message) return { ...node }
+
+    const content = message.content.content_type === 'text'
+        ? { ...message.content, parts: [...message.content.parts] }
+        : message.content
+
+    return {
+        ...node,
+        message: {
+            ...message,
+            content,
+            metadata: message.metadata && { ...message.metadata },
+        },
+    }
+}
+
 function mergeContinuationNodes(nodes: ConversationNode[]): ConversationNode[] {
     const result: ConversationNode[] = []
     for (const node of nodes) {
         const prevNode = result[result.length - 1]
         if (
             prevNode?.message?.author.role === 'assistant' && node.message?.author.role === 'assistant'
-         && prevNode.message.recipient === 'all' && node.message.recipient === 'all'
-         && prevNode.message.content.content_type === 'text' && node.message.content.content_type === 'text'
+            && prevNode.message.recipient === 'all' && node.message.recipient === 'all'
+            && prevNode.message.content.content_type === 'text' && node.message.content.content_type === 'text'
         ) {
             const separator = prevNode.message.channel !== node.message.channel ? '\n\n' : ''
             prevNode.message.content.parts[prevNode.message.content.parts.length - 1] += separator + node.message.content.parts[0]
@@ -1080,21 +1101,23 @@ function attachThinkingToNodes(
                 }
             }
             else if (ct === 'thoughts') {
-                for (const thought of message.content.thoughts) {
-                    if (thought.content || thought.summary) {
-                        thinking.thoughts.unshift({
-                            summary: thought.summary,
-                            content: thought.content,
-                        })
-                    }
-                }
+                // The walk goes from leaf to root, so prepend each message's thoughts as a batch to keep their order.
+                thinking.thoughts.unshift(...message.content.thoughts
+                    .filter(thought => thought.content || thought.summary)
+                    .map(thought => ({ summary: thought.summary, content: thought.content })))
+            }
+            else if (ct === 'text' && message.metadata?.is_thinking_preamble_message) {
+                // Progress notes the model writes between reasoning steps, shown in ChatGPT's thinking panel.
+                const content = message.content.parts.join('\n')
+                if (content) thinking.thoughts.unshift({ summary: '', content })
             }
             else if (message.metadata?.reasoning_title) {
                 if (!thinking.activities) thinking.activities = []
+                // Repeated titles keep their first position, the walk sees them last.
                 const title = message.metadata.reasoning_title
-                if (!thinking.activities.includes(title)) {
-                    thinking.activities.unshift(title)
-                }
+                const index = thinking.activities.indexOf(title)
+                if (index !== -1) thinking.activities.splice(index, 1)
+                thinking.activities.unshift(title)
             }
             else if (message.author.role === 'user' && !message.metadata?.is_visually_hidden_from_conversation) {
                 if (targetNodeId && hasThinkingContent(thinking)) {

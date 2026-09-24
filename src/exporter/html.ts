@@ -10,10 +10,13 @@ import { buildZipFileName, downloadFile, getFileNameWithFormat } from '../utils/
 import { fromMarkdown, toHtml } from '../utils/markdown'
 import { ScriptStorage } from '../utils/storage'
 import { standardizeLineBreaks } from '../utils/text'
-import { dateStr, getColorScheme, timestamp, unixTimestampToISOString } from '../utils/utils'
+import { dateStr, getColorScheme } from '../utils/utils'
+import { transformAuthor } from '../utils/author'
 import type { ApiConversationWithId, ConversationNodeMessage, ConversationResult, ThinkingContent } from '../api'
 import type { ExportMeta } from '../ui/SettingContext'
 import type { PartInfo } from '../utils/download'
+import { escapeHtml, fillTemplate, metaDetailsHtml } from './htmlTemplate'
+import { getMetaVariables, resolveMetaList } from './meta'
 
 export async function exportToHtml(fileNameFormat: string, metaList: ExportMeta[]) {
     if (!checkIfConversationStarted()) {
@@ -82,7 +85,7 @@ export async function exportAllToHtml(fileNameFormat: string, apiConversations: 
 }
 
 function conversationToHtml(conversation: ConversationResult, avatar: string, metaList?: ExportMeta[]) {
-    const { id, title, model, modelSlug, createTime, updateTime, conversationNodes } = conversation
+    const { id, title, conversationNodes } = conversation
 
     const enableTimestamp = ScriptStorage.get<boolean>(KEY_TIMESTAMP_ENABLED) ?? false
     const timeStampHtml = ScriptStorage.get<boolean>(KEY_TIMESTAMP_HTML) ?? false
@@ -97,8 +100,7 @@ function conversationToHtml(conversation: ConversationResult, avatar: string, me
         if (shouldSkipMessageInExport(message)) return null
 
         const author = transformAuthor(message.author)
-        const model = message?.metadata?.model_slug === 'gpt-4' ? 'GPT-4' : 'GPT-3'
-        const authorType = message.author.role === 'user' ? 'user' : model
+        const authorType = message.author.role === 'user' ? 'user' : 'assistant'
         const avatarEl = message.author.role === 'user'
             ? `<img alt="${escapeHtml(author)}" />`
             : '<svg width="41" height="41"><use xlink:href="#chatgpt" /></svg>'
@@ -185,58 +187,19 @@ function conversationToHtml(conversation: ConversationResult, avatar: string, me
     const lang = document.documentElement.lang ?? 'en'
     const theme = getColorScheme()
 
-    const _metaList = metaList
-        ?.filter(x => !!x.name)
-        .map(({ name, value }) => {
-            const val = value
-                .replace('{title}', title)
-                .replace('{date}', date)
-                .replace('{timestamp}', timestamp())
-                .replace('{source}', source)
-                .replace('{model}', model)
-                .replace('{mode_name}', modelSlug)
-                .replace('{create_time}', unixTimestampToISOString(createTime))
-                .replace('{update_time}', unixTimestampToISOString(updateTime))
+    const _metaList = resolveMetaList(metaList, getMetaVariables(conversation, source, date))
 
-            return [name, val] as const
-        })
-    ?? []
-    const detailsHtml = _metaList.length > 0
-        ? `<details>
-    <summary>Metadata</summary>
-    <div class="metadata_container">
-        ${_metaList.map(([key, value]) => `<div class="metadata_item"><div>${escapeHtml(key)}</div><div>${escapeHtml(value)}</div></div>`).join('\n')}
-    </div>
-</details>`
-        : ''
-
-    // Use function replacements so values containing `$` are inserted verbatim
-    // (string replacements interpret `$$`, `$&`, etc.). User-influenced values
-    // (title/source/avatar/lang/theme) are escaped to prevent HTML injection.
-    const html = templateHtml
-        .replaceAll('{{title}}', () => escapeHtml(title))
-        .replaceAll('{{date}}', () => escapeHtml(date))
-        .replaceAll('{{time}}', () => escapeHtml(time))
-        .replaceAll('{{source}}', () => escapeHtml(source))
-        .replaceAll('{{lang}}', () => escapeHtml(lang))
-        .replaceAll('{{theme}}', () => escapeHtml(theme))
-        .replaceAll('{{avatar}}', () => safeCssUrl(avatar))
-        .replaceAll('{{details}}', () => detailsHtml)
-        .replaceAll('{{content}}', () => conversationHtml)
-    return html
-}
-
-function transformAuthor(author: ConversationNodeMessage['author']): string {
-    switch (author.role) {
-        case 'assistant':
-            return 'ChatGPT'
-        case 'user':
-            return 'You'
-        case 'tool':
-            return `Plugin${author.name ? ` (${author.name})` : ''}`
-        default:
-            return author.role
-    }
+    return fillTemplate(templateHtml, {
+        title: escapeHtml(title),
+        date,
+        time,
+        source: escapeHtml(source),
+        lang: escapeHtml(lang),
+        theme: escapeHtml(theme),
+        avatar: safeCssUrl(avatar),
+        details: metaDetailsHtml(_metaList),
+        content: conversationHtml,
+    })
 }
 
 /**
@@ -332,16 +295,6 @@ function formatThinkingHtml(thinking: ThinkingContent): string {
 
     return `<details class="thinking"><summary>${escapeHtml(durationLabel)}</summary>${body}</details>`
 }
-
-function escapeHtml(html: string) {
-    return html
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;')
-}
-
 /**
  * Sanitize a value that is interpolated into an unquoted CSS `url(...)`
  * (the exported avatar). The avatar is normally a canvas-produced data URI,
