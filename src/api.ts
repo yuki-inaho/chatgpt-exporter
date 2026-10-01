@@ -628,47 +628,53 @@ async function fetchProjectConversations(project: string, cursor: string | numbe
 }
 
 /**
- * Fetch a single page of conversations starting at `offset`.
+ * Fetch a single page using a main-list offset or an opaque project cursor.
  * Useful for "load more" functionality in the UI — call this after the initial
  * full load to append additional pages without re-fetching everything.
  */
 export async function fetchConversationsPage(
     project: string | null,
-    offset: number,
+    offset: number | string,
     limit: number,
 ): Promise<ApiConversations> {
-    return fetchConversations(offset, limit, project)
+    if (project) return fetchProjectConversations(project, offset, limit)
+    if (typeof offset !== 'number') throw new Error('Main conversations require a numeric offset.')
+    return fetchConversations(offset, limit)
 }
 
-export async function fetchAllConversations(project: string | null = null, maxConversations = 1000, onBatch?: (batch: ApiConversationItem[]) => void, onHasMore?: (hasMore: boolean) => void, onError?: (error: unknown) => void): Promise<ApiConversationItem[]> {
+export async function fetchAllConversations(project: string | null = null, maxConversations = 1000, onBatch?: (batch: ApiConversationItem[]) => void, onHasMore?: (hasMore: boolean) => void, onError?: (error: unknown) => void, onPage?: (page: ApiConversations) => void): Promise<ApiConversationItem[]> {
     const conversations: ApiConversationItem[] = []
     const limit = project === null ? 100 : 50 // gizmos api uses a smaller limit
     let offset = 0
     let cursor: string | number = 0 // project conversations use alphanumeric cursors
-    while (true) {
+    let hasMore = false
+    while (conversations.length < maxConversations) {
         try {
+            // Do not discard a project page's tail: its cursor cannot rewind
+            // to the slice boundary when the user later loads more.
+            const pageLimit = Math.min(limit, maxConversations - conversations.length)
             const result: ApiConversations = project === null
-                ? await fetchConversations(offset, limit)
-                : await fetchProjectConversations(project, cursor, limit)
+                ? await fetchConversations(offset, pageLimit)
+                : await fetchProjectConversations(project, cursor, pageLimit)
             if (!result.items) {
                 // Handle potential API errors or empty responses
                 console.warn('fetchAllConversations received no items at offset:', offset)
                 break
             }
             conversations.push(...result.items)
+            onPage?.(result)
+            hasMore = project === null
+                ? result.total != null && conversations.length < result.total
+                : result.cursor != null
             if (result.items.length === 0) break
             onBatch?.(result.items)
-            // Stop if the API signals no more pages (no total count and no next cursor)
-            if (result.total == null && result.cursor == null) break
-            // Stop if we've reached the total reported by the API OR the user-defined limit
-            if (result.total !== null && offset + limit >= result.total) break
-            if (conversations.length >= maxConversations) break
+            if (!hasMore) break
             // Use the alphanumeric cursor for project conversations, fall back to numeric offset otherwise
             if (result.cursor != null) {
                 cursor = result.cursor
             }
             else {
-                offset += limit
+                offset += result.items.length
             }
         }
         catch (error) {
@@ -677,10 +683,8 @@ export async function fetchAllConversations(project: string | null = null, maxCo
             break
         }
     }
-    // Ensure we don't return more than the requested limit if the last batch pushed us over
     const result = conversations.slice(0, maxConversations)
-    // Let the caller know whether the fetch was cut off by the user limit vs the API having no more data
-    onHasMore?.(result.length >= maxConversations)
+    onHasMore?.(hasMore)
     return result
 }
 

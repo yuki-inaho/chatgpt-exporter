@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { toHtml } from '../src/utils/markdown'
 
 describe('markdown URL safety after the micromark migration', () => {
-    it.each(['javascript:alert(1)', 'vbscript:alert(1)', 'file:///etc/passwd', 'data:text/html,hello'])('drops %s links', (url) => {
+    it.each(['javascript:alert(1)', 'JaVaScRiPt:alert(1)', 'javascript&#x3a;alert(1)', 'javascript&colon;alert(1)', 'vbscript:alert(1)', 'file:///etc/passwd', 'data:text/html,hello'])('drops %s links', (url) => {
         expect(toHtml(`[link](<${url}>)`)).toContain('href=""')
     })
 

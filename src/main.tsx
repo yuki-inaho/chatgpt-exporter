@@ -46,6 +46,9 @@ function main() {
             const activeTargets = new Set(mounts.map(({ target }) => target))
             injectionMap.forEach((container, target) => {
                 if (!target.isConnected || !container.isConnected || !activeTargets.has(target)) {
+                    // Portals and subscriptions outlive a detached DOM node unless
+                    // Preact unmounts the component tree first.
+                    render(null, container)
                     container.remove()
                     injectionMap.delete(target)
                 }

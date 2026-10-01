@@ -447,8 +447,8 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
     const [totalAvailable, setTotalAvailable] = useState<number | null>(null)
 
     const requestQueue = useMemo(() => new RequestQueue<ApiConversationWithId>(200, 1600), [])
-    const archiveQueue = useMemo(() => new RequestQueue<boolean>(200, 1600), [])
-    const deleteQueue = useMemo(() => new RequestQueue<boolean>(200, 1600), [])
+    const archiveQueue = useMemo(() => new RequestQueue<ApiConversationItem>(200, 1600), [])
+    const deleteQueue = useMemo(() => new RequestQueue<ApiConversationItem>(200, 1600), [])
 
     const [progress, setProgress] = useState({
         total: 0,
@@ -469,21 +469,32 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
     const skippedRef = useRef<string[]>([])
     /** Incremented on each new fetch; callbacks check this to discard stale results after remount */
     const fetchGenRef = useRef(0)
+    const nextCursorRef = useRef<string | null>(null)
+    const exportGenRef = useRef(0)
 
     const onUpload = useCallback((e: ChangeEvent<HTMLInputElement>) => {
         const file = (e.target as HTMLInputElement)?.files?.[0]
         if (!file) return
         const fileReader = new FileReader()
         fileReader.onload = () => {
-            const data = JSON.parse(fileReader.result as string)
-            if (!Array.isArray(data)) {
+            let data: unknown
+            try {
+                data = JSON.parse(fileReader.result as string)
+            }
+            catch {
                 alert(t('Invalid File Format'))
                 return
             }
+            if (!Array.isArray(data) || !data.every(c => c && typeof c.id === 'string' && typeof c.title === 'string')) {
+                alert(t('Invalid File Format'))
+                return
+            }
+            setError('')
             setSelected([])
             setExportSource('Local')
             setLocalConversations(data)
         }
+        fileReader.onerror = () => alert(t('Invalid File Format'))
         fileReader.readAsText(file)
     }, [t])
 
@@ -551,66 +562,83 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
                 return
             }
             const batchIdx = batchIndexRef.current
+            const gen = exportGenRef.current
             const totalBatches = totalBatchesRef.current
             const partIndex = batchIdx + 1
             const callback = exportAllOptions.find(o => o.label === exportType)?.callback
-            if (callback && results.length > 0) {
-                await callback(format, results, metaList, selectedProject?.display.name, partIndex, totalBatches)
-                // Only conversations that were actually exported successfully get recorded
-                markExported(results)
-            }
-            skippedRef.current.push(...requestQueue.getSkipped())
-            if (partIndex < totalBatches) {
-                await sleep(400)
-                batchIndexRef.current++
-                const nextChunk = pendingBatchesRef.current[batchIndexRef.current]
-                if (nextChunk) startApiBatch(nextChunk)
-            }
-            else {
-                setProcessing(false)
-                const skipped = skippedRef.current
-                if (skipped.length > 0) {
-                    const shown = skipped.slice(0, MAX_SKIPPED_SHOWN).map(name => `- ${name}`)
-                    if (skipped.length > MAX_SKIPPED_SHOWN) shown.push('- …')
-                    alert(`${t('Export Skipped Message', { n: skipped.length })}\n\n${shown.join('\n')}`)
+            try {
+                if (callback && results.length > 0) {
+                    await callback(format, results, metaList, selectedProject?.display.name, partIndex, totalBatches)
+                    // Only conversations that were actually exported successfully get recorded
+                    markExported(results)
                 }
+                if (gen !== exportGenRef.current) return
+                skippedRef.current.push(...requestQueue.getSkipped())
+                if (partIndex < totalBatches) {
+                    await sleep(400)
+                    if (gen !== exportGenRef.current) return
+                    batchIndexRef.current++
+                    const nextChunk = pendingBatchesRef.current[batchIndexRef.current]
+                    if (nextChunk) startApiBatch(nextChunk)
+                }
+                else {
+                    setProcessing(false)
+                    const skipped = skippedRef.current
+                    if (skipped.length > 0) {
+                        const shown = skipped.slice(0, MAX_SKIPPED_SHOWN).map(name => `- ${name}`)
+                        if (skipped.length > MAX_SKIPPED_SHOWN) shown.push('- …')
+                        alert(`${t('Export Skipped Message', { n: skipped.length })}\n\n${shown.join('\n')}`)
+                    }
+                }
+            }
+            catch (error) {
+                if (gen !== exportGenRef.current) return
+                setError(describeListLoadError(error))
+                setProcessing(false)
+                exportingRef.current = false
             }
         })
         return () => off()
     }, [requestQueue, exportAllOptions, exportType, format, metaList, startApiBatch, selectedProject, t])
 
     useEffect(() => {
-        const off = archiveQueue.on('done', () => {
+        const off = archiveQueue.on('done', (results) => {
             setProcessing(false)
-            setApiConversations(prev => prev.filter(c => !selected.some(s => s.id === c.id)))
-            dropFromListCache(selected)
+            setApiConversations(prev => prev.filter(c => !results.some(s => s.id === c.id)))
+            dropFromListCache(results)
             setSelected([])
-            alert(t('Conversation Archived Message'))
+            if (archiveQueue.getSkipped().length > 0) setError(t('Error'))
+            else if (!cancelledRef.current) alert(t('Conversation Archived Message'))
         })
         return () => off()
-    }, [archiveQueue, selected, t])
+    }, [archiveQueue, t])
 
     useEffect(() => {
-        const off = deleteQueue.on('done', () => {
+        const off = deleteQueue.on('done', (results) => {
             setProcessing(false)
-            setApiConversations(prev => prev.filter(c => !selected.some(s => s.id === c.id)))
-            dropFromListCache(selected)
+            setApiConversations(prev => prev.filter(c => !results.some(s => s.id === c.id)))
+            dropFromListCache(results)
             setSelected([])
-            alert(t('Conversation Deleted Message'))
+            if (deleteQueue.getSkipped().length > 0) setError(t('Error'))
+            else if (!cancelledRef.current) alert(t('Conversation Deleted Message'))
         })
         return () => off()
-    }, [deleteQueue, selected, t])
+    }, [deleteQueue, t])
 
     const cancelExport = useCallback(() => {
         cancelledRef.current = true
+        exportGenRef.current++
         requestQueue.stop()
         archiveQueue.stop()
         deleteQueue.stop()
+        setProcessing(false)
+        exportingRef.current = false
     }, [requestQueue, archiveQueue, deleteQueue])
 
     const exportAllFromApi = useCallback(() => {
         if (disabled) return
         cancelledRef.current = false
+        exportGenRef.current++
         skippedRef.current = []
         const chunks = chunkArray(selected, EXPORT_OPERATION_BATCH)
         pendingBatchesRef.current = chunks
@@ -635,13 +663,26 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
         const callback = exportAllOptions.find(o => o.label === exportType)?.callback
         if (!callback) return
         const chunks = chunkArray(results, EXPORT_OPERATION_BATCH)
+        const gen = ++exportGenRef.current
+        cancelledRef.current = false
         setProcessing(true)
-        for (let i = 0; i < chunks.length; i++) {
-            await callback(format, chunks[i], metaList, selectedProject?.display.name, i + 1, chunks.length)
-            markExported(chunks[i])
-            if (i < chunks.length - 1) await sleep(400)
+        try {
+            for (let i = 0; i < chunks.length; i++) {
+                if (gen !== exportGenRef.current) return
+                await callback(format, chunks[i], metaList, selectedProject?.display.name, i + 1, chunks.length)
+                markExported(chunks[i])
+                if (i < chunks.length - 1) await sleep(400)
+            }
         }
-        setProcessing(false)
+        catch (error) {
+            if (gen === exportGenRef.current) setError(describeListLoadError(error))
+        }
+        finally {
+            if (gen === exportGenRef.current) {
+                setProcessing(false)
+                exportingRef.current = false
+            }
+        }
     }, [disabled, selected, localConversations, exportAllOptions, exportType, format, metaList, selectedProject])
 
     const exportAll = useMemo(() => {
@@ -651,9 +692,16 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
     const deleteAll = useCallback(() => {
         if (disabled) return
         if (!confirm(t('Conversation Delete Alert'))) return
+        cancelledRef.current = false
         deleteQueue.clear()
-        selected.forEach(({ id, title }) => {
-            deleteQueue.add({ name: title, request: () => deleteConversation(id) })
+        selected.forEach((conversation) => {
+            deleteQueue.add({
+                name: conversation.title,
+                request: async () => {
+                    if (!await deleteConversation(conversation.id)) throw new Error('Delete was not confirmed.')
+                    return conversation
+                },
+            })
         })
         deleteQueue.start()
     }, [disabled, selected, deleteQueue, t])
@@ -661,9 +709,16 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
     const archiveAll = useCallback(() => {
         if (disabled) return
         if (!confirm(t('Conversation Archive Alert'))) return
+        cancelledRef.current = false
         archiveQueue.clear()
-        selected.forEach(({ id, title }) => {
-            archiveQueue.add({ name: title, request: () => archiveConversation(id) })
+        selected.forEach((conversation) => {
+            archiveQueue.add({
+                name: conversation.title,
+                request: async () => {
+                    if (!await archiveConversation(conversation.id)) throw new Error('Archive was not confirmed.')
+                    return conversation
+                },
+            })
         })
         archiveQueue.start()
     }, [disabled, selected, archiveQueue, t])
@@ -671,8 +726,10 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
     // Cancel any in-flight work when the dialog unmounts to avoid stale-state errors
     useEffect(() => {
         const genRef = fetchGenRef
+        const exportRef = exportGenRef
         return () => {
             exportingRef.current = false
+            exportRef.current++
             genRef.current++
             requestQueue.clear()
             archiveQueue.clear()
@@ -699,6 +756,8 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
         const gen = ++fetchGenRef.current
         const alive = () => gen === fetchGenRef.current
         setSelected([])
+        setLoadingMore(false)
+        nextCursorRef.current = null
 
         const cache = selectedProjectId === null && listCache?.limit === exportAllLimit ? listCache : null
         if (cache) {
@@ -714,15 +773,13 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
                 exportAllLimit,
             )
                 .then(({ head, total }) => {
+                    if (!alive() || !listCache || listCache.limit !== exportAllLimit) return
                     // Merge onto the latest cache: "Load more" may have appended while this ran
-                    if (listCache) {
-                        listCache = {
-                            ...listCache,
-                            items: applyHead(head, listCache.items),
-                            total: listCache.total !== null ? total : null,
-                        }
+                    listCache = {
+                        ...listCache,
+                        items: applyHead(head, listCache.items),
+                        total,
                     }
-                    if (!alive() || !listCache) return
                     setApiConversations(prev => applyHead(head, prev))
                     setTotalAvailable(listCache.total)
                     // Selections made before the refresh landed must carry the new update_time
@@ -739,6 +796,7 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
         setError('')
         setLoading(true)
         let loadedHasMore = false
+        let loadedTotal: number | null = null
         let loadFailed = false
         fetchAllConversations(
             selectedProjectId,
@@ -753,11 +811,17 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
                 loadFailed = true
                 if (alive()) setError(describeListLoadError(error))
             },
+            (page) => {
+                loadedTotal = page.total
+                if (!alive()) return
+                nextCursorRef.current = page.cursor ?? null
+                setTotalAvailable(page.total)
+            },
         )
             .then((items) => {
                 // A list cut short by an error would hide its tail until reload
-                if (selectedProjectId === null && items.length > 0 && !loadFailed) {
-                    listCache = { limit: exportAllLimit, items, hasMore: loadedHasMore, total: null }
+                if (alive() && selectedProjectId === null && items.length > 0 && !loadFailed) {
+                    listCache = { limit: exportAllLimit, items, hasMore: loadedHasMore, total: loadedTotal }
                 }
             })
             .catch((err: Error) => {
@@ -768,32 +832,48 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
             .finally(() => { if (alive()) setLoading(false) })
     }, [exportAllLimit, selectedProjectId])
 
+    const loadMoreLimit = selectedProjectId === null ? EXPORT_OPERATION_BATCH : 50
     const loadMore = useCallback(async () => {
         if (loadingMore) return
+        const gen = fetchGenRef.current
+        const alive = () => gen === fetchGenRef.current
+        const cursor = selectedProjectId === null ? apiConversations.length : nextCursorRef.current
+        if (cursor === null) return
         setLoadingMore(true)
         try {
-            const page = await fetchConversationsPage(selectedProjectId, apiConversations.length, EXPORT_OPERATION_BATCH)
-            setApiConversations(prev => [...prev, ...page.items])
+            const limit = loadMoreLimit
+            const page = await fetchConversationsPage(selectedProjectId, cursor, limit)
+            if (!alive()) return
+            const append = (prev: ApiConversationItem[]) => {
+                const ids = new Set(prev.map(c => c.id))
+                return [...prev, ...page.items.filter(c => !ids.has(c.id))]
+            }
+            setApiConversations(append)
+            nextCursorRef.current = page.cursor ?? null
+            setError('')
             if (page.total !== null) setTotalAvailable(page.total)
-            const more = page.items.length >= EXPORT_OPERATION_BATCH
-                && (page.total === null || apiConversations.length + page.items.length < page.total)
+            const more = selectedProjectId === null
+                ? page.items.length > 0 && (page.total === null ? page.items.length >= limit : append(apiConversations).length < page.total)
+                : page.cursor != null
             setHasMore(more)
             if (selectedProjectId === null && listCache) {
                 listCache = {
                     ...listCache,
-                    items: [...listCache.items, ...page.items],
+                    items: append(listCache.items),
                     hasMore: more,
                     total: page.total ?? listCache.total,
                 }
             }
         }
         catch (err) {
+            if (!alive()) return
             console.error('loadMore error', err)
+            setError(describeListLoadError(err))
         }
         finally {
-            setLoadingMore(false)
+            if (alive()) setLoadingMore(false)
         }
-    }, [loadingMore, apiConversations.length, selectedProjectId])
+    }, [loadingMore, apiConversations, selectedProjectId, loadMoreLimit])
 
     const totalBatches = Math.ceil(selected.length / EXPORT_OPERATION_BATCH) || 1
 
@@ -850,7 +930,7 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
                         </button>
                     )}
                     {exportSource === 'API' && (
-                        <button className="ce-icon-button" aria-label="Upload" onClick={() => fileInputRef.current?.click()}>
+                        <button className="ce-icon-button" aria-label="Upload" disabled={processing} onClick={() => fileInputRef.current?.click()}>
                             <IconUpload className="ce-icon" />
                         </button>
                     )}
@@ -893,8 +973,8 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
                         {loadingMore
                             ? `${t('Loading')}...`
                             : totalAvailable !== null
-                                ? t('Load more conversations remaining', { n: EXPORT_OPERATION_BATCH, remaining: totalAvailable - apiConversations.length })
-                                : t('Load more conversations', { n: EXPORT_OPERATION_BATCH })}
+                                ? t('Load more conversations remaining', { n: loadMoreLimit, remaining: totalAvailable - apiConversations.length })
+                                : t('Load more conversations', { n: loadMoreLimit })}
                     </button>
                     {totalAvailable !== null && !loadingMore && (
                         <span className="ce-muted-count">

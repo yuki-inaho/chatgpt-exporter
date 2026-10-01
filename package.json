@@ -64,12 +64,24 @@
     "eslint-plugin-react-refresh": "^0.4.26",
     "happy-dom": "^20.14.5",
     "husky": "^9.1.7",
-    "katex": "^0.16.11",
+    "katex": "0.16.21",
     "lint-staged": "^17.5.1",
     "react": "^18.3.1",
     "typescript": "^5.9.3",
     "vite": "^8.3.0",
     "vitest": "^5.0.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "ajv@8": "8.18.0",
+      "brace-expansion@1": "1.1.21",
+      "diff@5": "5.2.2",
+      "js-yaml@4": "4.3.2",
+      "lodash@4": "4.18.1",
+      "picomatch@2": "2.3.2",
+      "semver@5": "5.7.2",
+      "yaml@>=2.0.0 <2.8.3": "2.8.3"
+    }
   },
   "lint-staged": {
     "*.{js,jsx,ts,tsx}": "pnpm exec eslint"
