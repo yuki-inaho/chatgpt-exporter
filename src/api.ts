@@ -4,6 +4,7 @@ import { getChatIdFromUrl, getConversationFromSharePage, isSharePage, isTemporar
 import { loadShareConversation } from './share'
 import { getTemporaryChatId } from './temporaryChat'
 import { blobToDataURL } from './utils/dom'
+import { getCachedImage, setCachedImage } from './utils/imageCache'
 import { memorize } from './utils/memorize'
 import { getModelName } from './utils/model'
 
@@ -101,6 +102,13 @@ interface CiteMetadata {
     }>
 }
 
+interface MessageAttachment {
+    id: string
+    name: string
+    mime_type?: string
+    size?: number
+}
+
 interface MessageMeta {
     aggregate_result?: {
         code: string
@@ -135,6 +143,8 @@ interface MessageMeta {
     _cite_metadata?: CiteMetadata
     /** New-style content references for web search citations */
     content_references?: ContentReference[]
+    /** Files the user uploaded with this message */
+    attachments?: MessageAttachment[]
     /** Whether this message is hidden in the UI (e.g., internal system prompts) */
     is_visually_hidden_from_conversation?: boolean
     /** Whether this assistant message is a transient thinking preamble hidden from the final conversation */
@@ -479,6 +489,9 @@ export async function getCurrentChatId(): Promise<string> {
 }
 
 async function fetchImageFromPointer(uri: string) {
+    const cached = await getCachedImage(uri)
+    if (cached) return cached
+
     const pointer = uri.replace('sediment://', '')
     const imageDetails = await fetchApi<ApiFileDownload>(fileDownloadApi(pointer))
     if (imageDetails.status === 'error') {
@@ -489,10 +502,22 @@ async function fetchImageFromPointer(uri: string) {
     const image = await fetch(imageDetails.download_url)
     const blob = await image.blob()
     const base64 = await blobToDataURL(blob)
-    return base64.replace(/^data:.*?;/, `data:${image.headers.get('content-type')};`)
+    const dataUrl = base64.replace(/^data:.*?;/, `data:${image.headers.get('content-type')};`)
+    await setCachedImage(uri, dataUrl)
+    return dataUrl
 }
 
-/** replaces `sediment://` pointers with data uris containing the image */
+/**
+ * Returns a copy of the conversation with `sediment://` image pointers
+ * replaced by data uris. The input is left untouched so a raw conversation
+ * can be cached and reused for exports that want the original pointers.
+ */
+export async function withImageAssets<T extends ApiConversation>(conversation: T): Promise<T> {
+    const copy = structuredClone(conversation)
+    await replaceImageAssets(copy)
+    return copy
+}
+
 /** avoid errors in parsing multimodal parts we don't understand */
 async function replaceImageAssets(conversation: ApiConversation): Promise<void> {
     const isMultiModalInputImage = (part: any): part is MultiModalInputImage => {
@@ -544,14 +569,13 @@ async function replaceImageAssets(conversation: ApiConversation): Promise<void> 
     ])
 }
 
-export async function fetchConversation(chatId: string, shouldReplaceAssets: boolean): Promise<ApiConversationWithId> {
+export async function fetchConversation(chatId: string): Promise<ApiConversationWithId> {
     if (chatId.startsWith('__share__')) {
         const id = chatId.replace('__share__', '')
         const shareConversation = await loadShareConversation(
             getConversationFromSharePage(),
             () => fetchApi<ApiConversation>(shareConversationApi(id)),
         )
-        if (shouldReplaceAssets) await replaceImageAssets(shareConversation)
 
         return {
             id,
@@ -561,10 +585,6 @@ export async function fetchConversation(chatId: string, shouldReplaceAssets: boo
 
     const url = conversationApi(chatId)
     const conversation = await fetchApi<ApiConversation>(url)
-
-    if (shouldReplaceAssets) {
-        await replaceImageAssets(conversation)
-    }
 
     return {
         id: chatId,
@@ -620,7 +640,7 @@ export async function fetchConversationsPage(
     return fetchConversations(offset, limit, project)
 }
 
-export async function fetchAllConversations(project: string | null = null, maxConversations = 1000, onBatch?: (batch: ApiConversationItem[]) => void, onHasMore?: (hasMore: boolean) => void): Promise<ApiConversationItem[]> {
+export async function fetchAllConversations(project: string | null = null, maxConversations = 1000, onBatch?: (batch: ApiConversationItem[]) => void, onHasMore?: (hasMore: boolean) => void, onError?: (error: unknown) => void): Promise<ApiConversationItem[]> {
     const conversations: ApiConversationItem[] = []
     const limit = project === null ? 100 : 50 // gizmos api uses a smaller limit
     let offset = 0
@@ -653,6 +673,7 @@ export async function fetchAllConversations(project: string | null = null, maxCo
         }
         catch (error) {
             console.error('Error fetching conversations batch:', error)
+            onError?.(error)
             break
         }
     }
@@ -714,12 +735,15 @@ export async function deleteConversation(chatId: string): Promise<boolean> {
 export class RateLimitError extends Error {
     /** Milliseconds to wait before retrying */
     readonly retryAfterMs: number
+    /** Whether `retryAfterMs` came from `Retry-After` rather than the fallback */
+    readonly retryAfterFromServer: boolean
     constructor(retryAfterHeader: string | null) {
         super('Too Many Requests (429)')
         this.name = 'RateLimitError'
         const secs = retryAfterHeader != null ? Number.parseInt(retryAfterHeader, 10) : Number.NaN
+        this.retryAfterFromServer = Number.isFinite(secs) && secs > 0
         // Default to 30 s if the header is missing or unparseable
-        this.retryAfterMs = Number.isFinite(secs) && secs > 0 ? secs * 1000 : 30_000
+        this.retryAfterMs = this.retryAfterFromServer ? secs * 1000 : 30_000
     }
 }
 
@@ -868,6 +892,17 @@ export interface ConversationResult {
     conversationNodes: ConversationNode[]
     projectName?: string
     projectId?: string
+}
+
+/**
+ * Names of the files uploaded with a message. Their content lives in hidden
+ * tool messages, which exports skip. Images are left out, they already show
+ * as image parts of the message.
+ */
+export function getFileAttachmentNames(message: ConversationNodeMessage): string[] {
+    return (message.metadata?.attachments ?? [])
+        .filter(attachment => attachment.name && !attachment.mime_type?.startsWith('image/'))
+        .map(attachment => attachment.name)
 }
 
 export function shouldSkipMessageInExport(message?: ConversationNodeMessage): boolean {

@@ -1,5 +1,5 @@
 import JSZip from 'jszip'
-import { fetchConversation, getCurrentChatId, processConversation, shouldSkipMessageInExport } from '../api'
+import { fetchConversation, getCurrentChatId, getFileAttachmentNames, processConversation, shouldSkipMessageInExport, withImageAssets } from '../api'
 import { KEY_SOURCES_ENABLED, KEY_THINKING_ENABLED, KEY_TIMESTAMP_24H, KEY_TIMESTAMP_ENABLED, KEY_TIMESTAMP_HTML, baseUrl } from '../constants'
 import i18n from '../i18n'
 import { checkIfConversationStarted, getUserAvatar } from '../page'
@@ -7,7 +7,8 @@ import templateHtml from '../template.html?raw'
 import { checkIfTemporaryChatIsExportable } from '../temporaryChat'
 import { transformContentReferences } from '../utils/citations'
 import { buildZipFileName, downloadFile, getFileNameWithFormat } from '../utils/download'
-import { fromMarkdown, toHtml } from '../utils/markdown'
+import { protectMath, toBracketDelimiters } from '../utils/latex'
+import { toHtml } from '../utils/markdown'
 import { ScriptStorage } from '../utils/storage'
 import { standardizeLineBreaks } from '../utils/text'
 import { dateStr, getColorScheme } from '../utils/utils'
@@ -32,7 +33,7 @@ export async function exportToHtml(fileNameFormat: string, metaList: ExportMeta[
     const userAvatar = await getUserAvatar()
 
     const chatId = await getCurrentChatId()
-    const rawConversation = await fetchConversation(chatId, true)
+    const rawConversation = await withImageAssets(await fetchConversation(chatId))
     const enableThinking = ScriptStorage.get<boolean>(KEY_THINKING_ENABLED) ?? false
     const conversation = processConversation(rawConversation, { enableThinking })
     const html = conversationToHtml(conversation, userAvatar, metaList)
@@ -92,8 +93,6 @@ function conversationToHtml(conversation: ConversationResult, avatar: string, me
     const timeStamp24H = ScriptStorage.get<boolean>(KEY_TIMESTAMP_24H) ?? false
     const enableSources = ScriptStorage.get<boolean>(KEY_SOURCES_ENABLED) ?? true
 
-    const LatexRegex = /(\s\$\$.+?\$\$\s|\s\$.+?\$\s|\\\[.+?\\\]|\\\(.+?\\\))|(^\$$[\S\s]+?^\$$)|(^\$\$[\S\s]+?^\$\$\$)/gm
-
     const conversationHtml = conversationNodes.map(({ message, thinking }) => {
         if (!message || !message.content) return null
 
@@ -116,41 +115,21 @@ function conversationToHtml(conversation: ConversationResult, avatar: string, me
             }))
 
             postSteps.push((input) => {
-                const matches = input.match(LatexRegex)
-
-                // Skip code block as the following steps can potentially break the code
-                const isCodeBlock = /```/.test(input)
-                if (!isCodeBlock && matches) {
-                    let index = 0
-                    input = input.replace(LatexRegex, () => {
-                        // Replace it with `╬${index}╬` to avoid processing from ruining the formula
-                        return `╬${index++}╬`
-                    })
-                    input = input
-                        .replace(/^\\\[(.+)\\\]$/gm, '$$$$$1$$$$')
-                        .replace(/\\\[/g, '$$')
-                        .replace(/\\\]/g, '$$')
-                        .replace(/\\\(/g, '$')
-                        .replace(/\\\)/g, '$')
-                }
-
-                let transformed = toHtml(fromMarkdown(input))
-
-                if (!isCodeBlock && matches) {
-                    // Replace `╬${index}╬` back to the original latex
-                    transformed = transformed.replace(/╬(\d+)╬/g, (_, index) => {
-                        return matches[+index]
-                    })
-                }
-
-                return transformed
+                // Keep formulas out of the markdown round trip, which would eat their backslashes
+                const { text, restore } = protectMath(input)
+                return restore(toHtml(text), formula => escapeHtml(toBracketDelimiters(formula)))
             })
         }
-        if (message.author.role === 'user') {
-            postSteps = [...postSteps, input => `<p class="no-katex">${escapeHtml(input)}</p>`]
+        else {
+            // Only assistant replies are markdown. A tool message can hold an uploaded HTML page.
+            postSteps = [input => `<p class="no-katex">${escapeHtml(input)}</p>`]
         }
         const postProcess = (input: string) => postSteps.reduce((acc, fn) => fn(acc), input)
         const content = transformContent(message.content, message.metadata, postProcess)
+        const attachments = getFileAttachmentNames(message)
+        const attachmentsHtml = attachments.length
+            ? `<ul class="attachments">${attachments.map(name => `<li>📎 ${escapeHtml(name)}</li>`).join('')}</ul>`
+            : ''
 
         const timestamp = message?.create_time ?? ''
         const showTimestamp = enableTimestamp && timeStampHtml && timestamp
@@ -175,6 +154,7 @@ function conversationToHtml(conversation: ConversationResult, avatar: string, me
         ${thinkingBlock}
         <div class="conversation-content">
             ${content}
+            ${attachmentsHtml}
         </div>
     </div>
     ${timestampHtml}
@@ -232,7 +212,7 @@ function transformContent(
         case 'text':
             return postProcess(content.parts?.join('\n') || '')
         case 'code':
-            return `Code:\n\`\`\`\n${escapeHtml(content.text)}\n\`\`\`` || ''
+            return postProcess(`Code:\n\`\`\`\n${content.text}\n\`\`\``)
         case 'execution_output':
             if (metadata?.aggregate_result?.messages) {
                 return metadata.aggregate_result.messages

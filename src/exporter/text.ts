@@ -25,7 +25,7 @@ export async function exportToText() {
     const chatId = await getCurrentChatId()
     // All image in text output will be replaced with `[image]`
     // So we don't need to waste time to download them
-    const rawConversation = await fetchConversation(chatId, false)
+    const rawConversation = await fetchConversation(chatId)
 
     const { conversationNodes } = processConversation(rawConversation)
     const text = conversationNodes
@@ -126,12 +126,7 @@ function reformatContent(input: string) {
 
         return [item]
     })
-    const result = toMarkdown(root)
-    // HACK: render to markdown will let [ be escaped, so we need to remove the first character
-    if (result.startsWith('\\[') && input.startsWith('[')) {
-        return result.slice(1)
-    }
-    return result
+    return toMarkdown(root, input)
 }
 
 /**

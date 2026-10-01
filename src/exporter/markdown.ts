@@ -1,5 +1,5 @@
 import JSZip from 'jszip'
-import { fetchConversation, getCurrentChatId, processConversation, shouldSkipMessageInExport } from '../api'
+import { fetchConversation, getCurrentChatId, getFileAttachmentNames, processConversation, shouldSkipMessageInExport, withImageAssets } from '../api'
 import { KEY_SOURCES_ENABLED, KEY_THINKING_ENABLED, KEY_TIMESTAMP_24H, KEY_TIMESTAMP_ENABLED, KEY_TIMESTAMP_MARKDOWN, baseUrl } from '../constants'
 import i18n from '../i18n'
 import { checkIfConversationStarted } from '../page'
@@ -28,7 +28,7 @@ export async function exportToMarkdown(fileNameFormat: string, metaList: ExportM
     }
 
     const chatId = await getCurrentChatId()
-    const rawConversation = await fetchConversation(chatId, true)
+    const rawConversation = await withImageAssets(await fetchConversation(chatId))
     const enableThinking = ScriptStorage.get<boolean>(KEY_THINKING_ENABLED) ?? false
     const conversation = processConversation(rawConversation, { enableThinking })
     const markdown = conversationToMarkdown(conversation, metaList)
@@ -126,13 +126,15 @@ function conversationToMarkdown(conversation: ConversationResult, metaList?: Exp
             postSteps.push((input) => {
                 // Keep formulas out of the markdown round trip, which would escape them
                 const { text, restore } = protectMath(input)
-                return restore(toMarkdown(fromMarkdown(text)))
+                return restore(toMarkdown(fromMarkdown(text), text))
             })
         }
         const postProcess = (input: string) => postSteps.reduce((acc, fn) => fn(acc), input)
         const content = transformContent(message.content, message.metadata, postProcess)
+        const attachments = getFileAttachmentNames(message).map(name => `- 📎 ${name}`).join('\n')
+        const attachmentsBlock = attachments ? `\n\n${attachments}` : ''
 
-        return `#### ${author}:\n${timestampHtml}${thinkingBlock}${content}`
+        return `#### ${author}:\n${timestampHtml}${thinkingBlock}${content}${attachmentsBlock}`
     }).filter(Boolean).join('\n\n')
 
     const markdown = `${frontMatter}# ${title}\n\n${content}`
@@ -184,7 +186,7 @@ function transformContent(
         case 'text':
             return postProcess(content.parts?.join('\n') || '')
         case 'code':
-            return `Code:\n\`\`\`\n${content.text}\n\`\`\`` || ''
+            return postProcess(`Code:\n\`\`\`\n${content.text}\n\`\`\``)
         case 'execution_output':
             if (metadata?.aggregate_result?.messages) {
                 return metadata.aggregate_result.messages

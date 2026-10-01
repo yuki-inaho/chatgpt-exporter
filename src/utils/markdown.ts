@@ -1,10 +1,10 @@
-import { toHtml as hastToHtml } from 'hast-util-to-html'
+import { micromark } from 'micromark'
 import { fromMarkdown as fm } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown, gfmToMarkdown } from 'mdast-util-gfm'
-import { toHast } from 'mdast-util-to-hast'
 import { toMarkdown as tm } from 'mdast-util-to-markdown'
-import { gfm } from 'micromark-extension-gfm'
+import { gfm, gfmHtml } from 'micromark-extension-gfm'
 import type { Content, Parent, Root } from 'mdast'
+import type { HtmlExtension } from 'micromark-extension-gfm'
 import type { Node } from 'unist'
 
 // ref: https://github.com/rxliuli/mdbook/blob/master/libs/markdown-util
@@ -16,7 +16,32 @@ export function fromMarkdown(content: string): Root {
     })
 }
 
-export function toMarkdown(ast: Content | Root): string {
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+const WIDE = /[\p{Extended_Pictographic}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6]/u
+
+/** Width in a monospace font, so tables line up with CJK text and emoji. */
+function displayWidth(value: string): number {
+    let width = 0
+    for (const { segment } of graphemes.segment(value)) width += WIDE.test(segment) ? 2 : 1
+    return width
+}
+
+/**
+ * Re-serializes a tree parsed from `source` in one consistent style: ATX
+ * headings, `*` emphasis, backtick fences, `---` rules and aligned tables.
+ *
+ * Text and line breaks are copied from `source` as written. The default
+ * handlers would escape characters like `_` and `[`, decode entities, and
+ * turn trailing-space line breaks into backslashes.
+ */
+export function toMarkdown(ast: Content | Root, source: string): string {
+    const slice = (node: Node) => {
+        const start = node.position!.start.offset!
+        let end = node.position!.end.offset!
+        // from-markdown 1.x ends a text node before the `;` of a trailing character reference
+        if (source[end] === ';' && /&(?:#x?[\da-f]+|\w+)$/i.test(source.slice(start, end))) end++
+        return source.slice(start, end)
+    }
     return tm(ast, {
         bullet: '-',
         bulletOther: '*',
@@ -30,52 +55,37 @@ export function toMarkdown(ast: Content | Root): string {
         ruleRepetition: 3,
         ruleSpaces: false,
         strong: '*',
-        extensions: [gfmToMarkdown()],
+        extensions: [gfmToMarkdown({ stringLength: displayWidth })],
+        handlers: {
+            // Continuation lines hold the container prefix (`> `, list indent),
+            // which the container handlers add back. A paragraph line never
+            // starts with whitespace or `>`, so strip those.
+            text: node => node.position
+                ? slice(node).split('\n').map((line, i) => i ? line.replace(/^[ \t>]*/, '') : line).join('\n')
+                : node.value,
+            break: node => node.position ? slice(node) : '  \n',
+        },
     })
 }
 
+// Drop raw HTML in the markdown, as mdast-util-to-hast did, instead of
+// micromark's default of showing it escaped. ChatGPT writes <br> in tables.
+const dropRawHtml: HtmlExtension = {
+    exit: {
+        htmlFlowData() {},
+        htmlTextData() {},
+    },
+}
+
 /**
- * Neutralize a URL that would otherwise allow script execution when the
- * exported HTML is opened. Returns '' for dangerous schemes. `data:` URIs are
- * only allowed for images (assistant images are inlined as data URIs).
+ * Compiles markdown straight to HTML, without building a syntax tree.
+ * URLs with protocols other than http(s), mailto, irc and xmpp are dropped.
  */
-function sanitizeUrl(url: string, allowDataImage: boolean): string {
-    // Strip control chars / whitespace (code point <= 0x20 or 0x7F) used to
-    // obfuscate the scheme, e.g. "java\tscript:" or leading newlines.
-    const cleaned = Array.from(url)
-        .filter((ch) => {
-            const code = ch.charCodeAt(0)
-            return code > 0x20 && code !== 0x7F
-        })
-        .join('')
-    if (/^(?:javascript|vbscript|file):/i.test(cleaned)) return ''
-    if (/^data:/i.test(cleaned)) {
-        return allowDataImage && /^data:image\//i.test(cleaned) ? url : ''
-    }
-    return url
-}
-
-/** Recursively sanitize href/src attributes in a hast tree in place. */
-function sanitizeHastUrls(node: any): void {
-    if (!node || typeof node !== 'object') return
-    if (node.type === 'element' && node.properties) {
-        const props = node.properties
-        if (node.tagName === 'a' && typeof props.href === 'string') {
-            props.href = sanitizeUrl(props.href, false)
-        }
-        if ((node.tagName === 'img' || node.tagName === 'source') && typeof props.src === 'string') {
-            props.src = sanitizeUrl(props.src, true)
-        }
-    }
-    if (Array.isArray(node.children)) {
-        for (const child of node.children) sanitizeHastUrls(child)
-    }
-}
-
-export function toHtml(node: Root): string {
-    const hast = toHast(node)!
-    sanitizeHastUrls(hast)
-    return hastToHtml(hast)
+export function toHtml(markdown: string): string {
+    return micromark(markdown, {
+        extensions: [gfm()],
+        htmlExtensions: [gfmHtml(), dropRawHtml],
+    })
 }
 
 export function flatMap<T extends Node>(
