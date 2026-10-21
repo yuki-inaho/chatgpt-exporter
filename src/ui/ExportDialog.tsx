@@ -4,7 +4,7 @@ import i18n, { useTranslation } from '../i18n'
 import { RateLimitError, archiveConversation, deleteConversation, fetchAllConversations, fetchConversation, fetchConversationsPage, fetchProjects, probeApi, withImageAssets } from '../api'
 import { EXPORT_OPERATION_BATCH, KEY_EXPORTED_UPDATE_TIMES } from '../constants'
 import { exportAllToHtml } from '../exporter/html'
-import { exportAllToJson, exportAllToOfficialJson } from '../exporter/json'
+import { exportAllToJson, exportAllToOfficialJson, exportAllToTavern } from '../exporter/json'
 import { exportAllToMarkdown } from '../exporter/markdown'
 import { applyHead, refreshConversationList } from '../utils/conversationList'
 import { RequestQueue } from '../utils/queue'
@@ -411,7 +411,7 @@ interface DialogContentProps {
 
 const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
     const { t } = useTranslation()
-    const { enableMeta, exportMetaList, exportAllLimit } = useSettingContext()
+    const { enableMeta, exportMetaList, exportAllLimit, imageMode } = useSettingContext()
     const metaList = useMemo(() => enableMeta ? exportMetaList : [], [enableMeta, exportMetaList])
 
     const exportAllOptions = useMemo(() => [
@@ -419,6 +419,7 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
         { label: 'HTML', callback: exportAllToHtml },
         { label: 'JSON', callback: exportAllToOfficialJson },
         { label: 'JSON (ZIP)', callback: exportAllToJson },
+        { label: 'TavernAI JSONL (ZIP)', callback: exportAllToTavern },
     ], [])
 
     const fileInputRef = useRef<HTMLInputElement>(null)
@@ -512,12 +513,14 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
                         conversation = await fetchConversation(id)
                         conversationCache.set(id, { updateTime: update_time, conversation })
                     }
-                    return exportType === 'JSON' ? conversation : withImageAssets(conversation)
+                    const leaveOutImages = imageMode === 'omit' && (exportType === 'Markdown' || exportType === 'JSON (ZIP)')
+                    const skipImages = exportType === 'JSON' || exportType === 'TavernAI JSONL (ZIP)' || leaveOutImages
+                    return skipImages ? conversation : withImageAssets(conversation)
                 },
             })
         })
         requestQueue.start()
-    }, [requestQueue, exportType])
+    }, [requestQueue, exportType, imageMode])
 
     useEffect(() => {
         const off = requestQueue.on('progress', (prog) => {
@@ -995,16 +998,17 @@ const DialogContent: FC<DialogContentProps> = ({ format, onClose }) => {
                         <option key={t(label)} value={label}>{label}</option>
                     ))}
                 </select>
-                <div className="ce-spacer"></div>
-                <button className="ce-button ce-button-red" disabled={disabled || exportSource === 'Local'} onClick={archiveAll}>
-                    {t('Archive')}
-                </button>
-                <button className="ce-button ce-button-red" disabled={disabled || exportSource === 'Local'} onClick={deleteAll}>
-                    {t('Delete')}
-                </button>
-                <button className="ce-button ce-button-green" disabled={disabled} onClick={exportAll}>
-                    {t('Export')}
-                </button>
+                <div className="ce-action-buttons">
+                    <button className="ce-button ce-button-red" disabled={disabled || exportSource === 'Local'} onClick={archiveAll}>
+                        {t('Archive')}
+                    </button>
+                    <button className="ce-button ce-button-red" disabled={disabled || exportSource === 'Local'} onClick={deleteAll}>
+                        {t('Delete')}
+                    </button>
+                    <button className="ce-button ce-button-green" disabled={disabled} onClick={exportAll}>
+                        {t('Export')}
+                    </button>
+                </div>
             </div>
             {totalBatches > 1 && !processing && (
                 <p className="ce-batch-note">

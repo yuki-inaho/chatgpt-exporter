@@ -16,6 +16,41 @@ function insertMenus() {
 }
 
 describe('exporter menu placement', () => {
+    it('keeps a project sidebar usable beside a cached legacy sidebar', () => {
+        document.body.innerHTML = `
+            <nav inert hidden><button data-testid="accounts-profile-button"></button></nav>
+            <aside>
+                <nav data-app-navigation-rail><div><button aria-haspopup="menu"></button></div></nav>
+                <nav id="project"><div data-app-action-sidebar-scroll></div></nav>
+            </aside>`
+        insertMenus()
+        expect(document.querySelectorAll('#project [data-test-menu]')).toHaveLength(1)
+        expect(document.querySelectorAll('[data-app-navigation-rail] [data-test-menu]')).toHaveLength(1)
+    })
+
+    it('does not duplicate a legacy profile in a redesigned footer or rail', () => {
+        document.body.innerHTML = `
+            <nav><div data-app-action-sidebar-scroll></div>
+                <div><button data-testid="accounts-profile-button" aria-haspopup="menu"></button></div>
+            </nav>
+            <nav data-app-navigation-rail>
+                <div><button data-testid="accounts-profile-button" aria-haspopup="menu"></button></div>
+            </nav>`
+        expect(insertMenus()).toHaveLength(2)
+        expect(document.querySelector<HTMLElement>('[data-app-navigation-rail] [data-test-menu]')?.style.pointerEvents).toBe('auto')
+    })
+
+    it('mounts each rail once when cached and active shells coexist', () => {
+        document.body.innerHTML = `
+            <nav data-app-navigation-rail inert><div><button aria-haspopup="menu"></button></div></nav>
+            <nav data-app-navigation-rail id="active">
+                <div><button aria-haspopup="menu"></button></div>
+                <div><button aria-haspopup="menu"></button></div>
+            </nav>`
+        expect(insertMenus()).toHaveLength(2)
+        expect(document.querySelectorAll('#active [data-test-menu]')).toHaveLength(1)
+    })
+
     it('mounts a text row and rail icon when Your dot replaces the profile footer', () => {
         document.body.innerHTML = `
             <aside>

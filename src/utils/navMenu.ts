@@ -27,22 +27,24 @@ function getNavMenuInsertionTarget(target: Element) {
 
 export function getNavMenuMounts(): NavMenuMount[] {
     const profileButtons = Array.from(document.querySelectorAll(PROFILE_BUTTON_SELECTOR))
-    if (profileButtons.length > 0) {
-        return profileButtons.map(target => ({
-            target,
-            insert: container => getNavMenuInsertionTarget(target).before(container),
-        }))
-    }
-
-    // The redesigned shell keeps the expanded sidebar and the collapsed rail
-    // mounted together and hides one with `inert`, so mount a menu in each.
-    const mounts: NavMenuMount[] = []
+    // Cached shells can coexist with a different active layout. Resolve each
+    // sidebar independently rather than letting a legacy anchor hide all others.
+    const mounts: NavMenuMount[] = profileButtons.map(target => ({
+        target,
+        insert: (container) => {
+            if (target.closest('[data-app-navigation-rail]')) {
+                (container as HTMLElement).style.pointerEvents = 'auto'
+            }
+            getNavMenuInsertionTarget(target).before(container)
+        },
+    }))
 
     Array.from(document.querySelectorAll(SIDEBAR_SCROLL_SELECTOR)).forEach((scrollRoot) => {
         // The profile footer follows either the scroll root or its wrapping nav.
         const footer = [scrollRoot.nextElementSibling, scrollRoot.parentElement?.nextElementSibling]
             .find(el => el?.querySelector('button[aria-haspopup="menu"]'))
         if (footer) {
+            if (footer.querySelector(PROFILE_BUTTON_SELECTOR)) return
             mounts.push({
                 target: footer,
                 insert: (container) => {
@@ -61,6 +63,7 @@ export function getNavMenuMounts(): NavMenuMount[] {
             // rail, leaving no footer in the expanded sidebar.
             const sidebar = scrollRoot.closest('nav')
             if (sidebar && !sidebar.hasAttribute('data-app-navigation-rail')) {
+                if (sidebar.querySelector(PROFILE_BUTTON_SELECTOR)) return
                 mounts.push({
                     target: scrollRoot,
                     insert: (container) => {
@@ -76,10 +79,11 @@ export function getNavMenuMounts(): NavMenuMount[] {
     })
 
     // Place the menu in its own row above the first footer menu of the rail.
-    const railMenuButton = document.querySelector(RAIL_MENU_BUTTON_SELECTOR)
-    const rail = railMenuButton?.closest('[data-app-navigation-rail]')
-    const railRow = rail && Array.from(rail.children).find(row => row.contains(railMenuButton))
-    if (railMenuButton && railRow) {
+    document.querySelectorAll('[data-app-navigation-rail]').forEach((rail) => {
+        if (rail.querySelector(PROFILE_BUTTON_SELECTOR)) return
+        const railMenuButton = rail.querySelector('button[aria-haspopup="menu"]')
+        const railRow = railMenuButton && Array.from(rail.children).find(row => row.contains(railMenuButton))
+        if (!railMenuButton || !railRow) return
         mounts.push({
             target: railMenuButton,
             insert: (container) => {
@@ -88,7 +92,7 @@ export function getNavMenuMounts(): NavMenuMount[] {
                 railRow.before(container)
             },
         })
-    }
+    })
 
     if (mounts.length > 0) return mounts
 

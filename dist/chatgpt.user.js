@@ -3,7 +3,7 @@
 // @name:zh-CN         ChatGPT Exporter
 // @name:zh-TW         ChatGPT Exporter
 // @namespace          pionxzh
-// @version            2.36.3
+// @version            2.38.0
 // @author             pionxzh
 // @description        Export ChatGPT conversations with one click — backup & share effortlessly!
 // @description:zh-CN  一键导出 ChatGPT 对话，轻松备份与分享
@@ -78,7 +78,7 @@
 	var __getOwnPropNames = Object.getOwnPropertyNames;
 	var __getProtoOf = Object.getPrototypeOf;
 	var __hasOwnProp = Object.prototype.hasOwnProperty;
-	var __commonJSMin = (cb, mod) => () => (mod || (cb((mod = { exports: {} }).exports, mod), cb = null), mod.exports);
+	var __commonJSMin = (cb, mod) => () => (mod || (cb((mod = { exports: {} }).exports, mod, mod.exports), cb = null), mod.exports);
 	var __exportAll = (all, no_symbols) => {
 		let target = {};
 		for (var name in all) __defProp(target, name, {
@@ -373,12 +373,12 @@
 	}, b$1.prototype.render = k$1, i$1 = [], r$1 = "function" == typeof Promise ? Promise.prototype.then.bind(Promise.resolve()) : setTimeout, f$1 = function(n, l) {
 		return n.__v.__b - l.__v.__b;
 	}, x.__r = 0, e$1 = 0;
-	var require_sentinel_umd = __commonJSMin(((exports, module) => {
+	var require_sentinel_umd = __commonJSMin(((exports, module, this$2) => {
 		(function(root, factory) {
 			if (typeof define === "function" && define.amd) define([], factory);
 			else if (typeof exports === "object") module.exports = factory();
 			else root.sentinel = factory();
-		})(exports, function() {
+		})(this$2, function() {
 			var isArray = Array.isArray, selectorToAnimationMap = {}, animationCallbacks = {}, styleEl, styleSheet, cssRules;
 			return {
 				on: function(cssSelectors, callback) {
@@ -436,8 +436,8 @@
 			};
 		});
 	}));
-	var require_dist = __commonJSMin(((exports) => {
-		var __assign = exports && exports.__assign || function() {
+	var require_dist = __commonJSMin(((exports, module, this$1) => {
+		var __assign = this$1 && this$1.__assign || function() {
 			__assign = Object.assign || function(t) {
 				for (var s, i = 1, n = arguments.length; i < n; i++) {
 					s = arguments[i];
@@ -532,6 +532,7 @@
 	var KEY_META_LIST = "exporter:meta_list";
 	var KEY_THINKING_ENABLED = "exporter:enable_thinking";
 	var KEY_SOURCES_ENABLED = "exporter:enable_sources";
+	var KEY_IMAGE_MODE = "exporter:image_mode";
 	var KEY_EXPORT_ALL_LIMIT = "exporter:export_all_limit";
 	var KEY_EXPORTED_UPDATE_TIMES = "exporter:exported_update_times";
 	var _GM_deleteValue = (() => typeof GM_deleteValue != "undefined" ? GM_deleteValue : void 0)();
@@ -581,7 +582,7 @@
 		return defaultAvatar;
 	}
 	function checkIfConversationStarted() {
-		return !!document.querySelector(["[data-testid^=\"conversation-turn-\"]", "[data-chatgpt-conversation-selection-target] [data-chatgpt-search-message-ids]"].join(", "));
+		return Array.from(document.querySelectorAll(["[data-testid^=\"conversation-turn-\"]", "[data-chatgpt-conversation-selection-target] [data-chatgpt-search-message-ids]"].join(", "))).some((el) => el.offsetHeight > 0);
 	}
 	function isCompleteConversation(conversation) {
 		return !!conversation?.mapping && !!conversation.current_node;
@@ -812,36 +813,43 @@
 		await replaceImageAssets(copy);
 		return copy;
 	}
-	async function replaceImageAssets(conversation) {
-		const isMultiModalInputImage = (part) => {
-			return typeof part === "object" && part !== null && "content_type" in part && part.content_type === "image_asset_pointer" && "asset_pointer" in part && typeof part.asset_pointer === "string" && part.asset_pointer.startsWith("sediment://");
+	function collectImageSources(conversation) {
+		const isImagePart = (part) => {
+			return typeof part === "object" && part !== null && part.content_type === "image_asset_pointer" && typeof part.asset_pointer === "string";
 		};
-		const imageAssets = Object.values(conversation.mapping).flatMap((node) => {
-			if (!node.message) return [];
-			if (node.message.content.content_type !== "multimodal_text") return [];
-			return (Array.isArray(node.message.content.parts) ? node.message.content.parts : []).filter(isMultiModalInputImage);
+		return Object.values(conversation.mapping).flatMap((node) => {
+			const message = node.message;
+			if (!message) return [];
+			if (message.content.content_type === "multimodal_text") return (Array.isArray(message.content.parts) ? message.content.parts : []).filter(isImagePart).map((part) => ({
+				src: part.asset_pointer,
+				replace: (src) => {
+					part.asset_pointer = src;
+				}
+			}));
+			if (message.content.content_type === "execution_output") return (message.metadata?.aggregate_result?.messages ?? []).filter((msg) => msg.message_type === "image").map((msg) => ({
+				src: msg.image_url,
+				replace: (src) => {
+					msg.image_url = src;
+				}
+			}));
+			return [];
 		});
-		const executionOutputs = Object.values(conversation.mapping).flatMap((node) => {
-			if (!node.message) return [];
-			if (node.message.content.content_type !== "execution_output") return [];
-			if (!node.message.metadata?.aggregate_result?.messages) return [];
-			return node.message.metadata.aggregate_result.messages.filter((msg) => msg.message_type === "image");
-		});
-		await Promise.all([...imageAssets.map(async (asset) => {
+	}
+	async function replaceImageSources(conversation, resolve) {
+		await Promise.all(collectImageSources(conversation).map(async (image) => {
 			try {
-				const newAssetPointer = await fetchImageFromPointer(asset.asset_pointer);
-				if (newAssetPointer) asset.asset_pointer = newAssetPointer;
+				const newSrc = await resolve(image.src);
+				if (newSrc) image.replace(newSrc);
 			} catch (error) {
 				console.error("Failed to fetch image asset", error);
 			}
-		}), ...executionOutputs.map(async (msg) => {
-			try {
-				const newImageUrl = await fetchImageFromPointer(msg.image_url);
-				if (newImageUrl) msg.image_url = newImageUrl;
-			} catch (error) {
-				console.error("Failed to fetch image asset", error);
-			}
-		})]);
+		}));
+	}
+	function replaceImageAssets(conversation) {
+		return replaceImageSources(conversation, async (src) => {
+			if (!src.startsWith("sediment://")) return null;
+			return fetchImageFromPointer(src);
+		});
 	}
 	async function fetchConversation(chatId) {
 		if (chatId.startsWith("__share__")) {
@@ -1107,7 +1115,7 @@
 		if (!message) return { ...node };
 		const content = message.content.content_type === "text" ? {
 			...message.content,
-			parts: [...message.content.parts]
+			parts: getInteractiveFallbackParts(message) ?? [...message.content.parts]
 		} : message.content;
 		return {
 			...node,
@@ -1117,6 +1125,14 @@
 				metadata: message.metadata && { ...message.metadata }
 			}
 		};
+	}
+	function getInteractiveFallbackParts(message) {
+		const markdown = message.metadata?.model_dil_v2?.fallbackMarkdown;
+		if (typeof markdown !== "string" || !markdown.trim() || message.content.content_type !== "text") return null;
+		const markup = message.content.parts.join("");
+		const leading = markup.slice(0, markup.length - markup.trimStart().length);
+		const trailing = markup.slice(markup.trimEnd().length);
+		return [leading + markdown.replaceAll(/<escape>([\s\S]*?)<\/escape>/g, "$1") + trailing];
 	}
 	function mergeContinuationNodes(nodes) {
 		const result = [];
@@ -1638,6 +1654,11 @@
 		"Export Thinking Process Description": "Include the model's thinking/reasoning process in exported Markdown and HTML files.",
 		"Export Sources": "Export Sources",
 		"Export Sources Description": "Include the source list shown at the end of each answer in exported Markdown and HTML files.",
+		Images: "Images",
+		"Images Description": "How images are saved in Markdown and JSON (ZIP) exports. When left out, Markdown shows [image] instead. HTML always embeds images.",
+		"Images Embed": "Embed in the file (base64)",
+		"Images Omit": "Leave out images",
+		"Images Files": "Save as separate files (.zip)",
 		Sources: "Sources",
 		"OpenAI Official Format": "OpenAI Official Format",
 		"Conversation Archive Alert": "Are you sure you want to archive all selected conversations?",
@@ -1706,6 +1727,11 @@
 		"Export Thinking Process Description": "Incluir el proceso de pensamiento/razonamiento del modelo en los archivos Markdown y HTML exportados.",
 		"Export Sources": "Exportar fuentes",
 		"Export Sources Description": "Incluir la lista de fuentes que se muestra al final de cada respuesta en los archivos Markdown y HTML exportados.",
+		Images: "Imágenes",
+		"Images Description": "Cómo se guardan las imágenes en las exportaciones Markdown y JSON (ZIP). Si se omiten, Markdown muestra [image] en su lugar. HTML siempre incrusta las imágenes.",
+		"Images Embed": "Incrustar en el archivo (base64)",
+		"Images Omit": "Omitir imágenes",
+		"Images Files": "Guardar como archivos separados (.zip)",
 		Sources: "Fuentes",
 		"OpenAI Official Format": "Formato Oficial de OpenAI",
 		"Conversation Archive Alert": "¿Estás seguro que quieres archivar todas las conversaciones seleccionadas?",
@@ -1774,6 +1800,11 @@
 		"Export Thinking Process Description": "Inclure le processus de réflexion/raisonnement du modèle dans les fichiers Markdown et HTML exportés.",
 		"Export Sources": "Exporter les sources",
 		"Export Sources Description": "Inclure la liste des sources affichée à la fin de chaque réponse dans les fichiers Markdown et HTML exportés.",
+		Images: "Images",
+		"Images Description": "Comment les images sont enregistrées dans les exports Markdown et JSON (ZIP). Si elles sont omises, Markdown affiche [image] à la place. HTML intègre toujours les images.",
+		"Images Embed": "Intégrer dans le fichier (base64)",
+		"Images Omit": "Omettre les images",
+		"Images Files": "Enregistrer en fichiers séparés (.zip)",
 		Sources: "Sources",
 		"OpenAI Official Format": "Format officiel OpenAI",
 		"Conversation Archive Alert": "Êtes-vous sûr de vouloir archiver toutes les conversations sélectionnées ?",
@@ -1842,6 +1873,11 @@
 		"Export Thinking Process Description": "Sertakan proses berpikir/penalaran model dalam file Markdown dan HTML yang diekspor.",
 		"Export Sources": "Ekspor Sumber",
 		"Export Sources Description": "Sertakan daftar sumber yang ditampilkan di akhir setiap jawaban dalam file Markdown dan HTML yang diekspor.",
+		Images: "Gambar",
+		"Images Description": "Cara gambar disimpan dalam ekspor Markdown dan JSON (ZIP). Jika dihilangkan, Markdown menampilkan [image] sebagai gantinya. HTML selalu menyematkan gambar.",
+		"Images Embed": "Sematkan di file (base64)",
+		"Images Omit": "Hilangkan gambar",
+		"Images Files": "Simpan sebagai file terpisah (.zip)",
 		Sources: "Sumber",
 		"OpenAI Official Format": "Format Resmi OpenAI",
 		"Conversation Archive Alert": "Apakah Anda yakin ingin mengarsipkan semua percakapan yang dipilih?",
@@ -1873,7 +1909,7 @@
 		Language: "言語",
 		"Copy Text": "テキストをコピー",
 		"Copied!": "コピーしました！",
-		Screenshot: "スクリーンショット",
+		Screenshot: "キャプチャ",
 		Markdown: "Markdown",
 		HTML: "HTML",
 		JSON: "JSON",
@@ -1910,6 +1946,11 @@
 		"Export Thinking Process Description": "エクスポートされたMarkdownおよびHTMLファイルにモデルの思考・推論プロセスを含めます。",
 		"Export Sources": "ソースをエクスポート",
 		"Export Sources Description": "各回答の末尾に表示されるソース一覧を、エクスポートされた Markdown および HTML ファイルに含めます。",
+		Images: "画像",
+		"Images Description": "Markdown と JSON (ZIP) のエクスポートでの画像の保存方法。省略した場合、Markdown では代わりに [image] と表示されます。HTML では常に画像が埋め込まれます。",
+		"Images Embed": "ファイルに埋め込む (base64)",
+		"Images Omit": "画像を省略",
+		"Images Files": "別ファイルとして保存 (.zip)",
 		Sources: "出典",
 		"OpenAI Official Format": "OpenAI公式フォーマット",
 		"Conversation Archive Alert": "選択したすべての会話をアーカイブしてもよろしいですか？",
@@ -1978,6 +2019,11 @@
 		"Export Thinking Process Description": "Включить процесс мышления/рассуждения модели в экспортированные файлы Markdown и HTML.",
 		"Export Sources": "Экспорт источников",
 		"Export Sources Description": "Включить список источников, показанный в конце каждого ответа, в экспортированные файлы Markdown и HTML.",
+		Images: "Изображения",
+		"Images Description": "Как сохранять изображения при экспорте в Markdown и JSON (ZIP). Если изображения пропущены, в Markdown вместо них будет [image]. HTML всегда встраивает изображения.",
+		"Images Embed": "Встроить в файл (base64)",
+		"Images Omit": "Не включать изображения",
+		"Images Files": "Сохранить отдельными файлами (.zip)",
 		Sources: "Источники",
 		"OpenAI Official Format": "Официальный формат OpenAI",
 		"Conversation Archive Alert": "Вы уверены, что хотите архивировать все выбранные разговоры?",
@@ -2046,6 +2092,11 @@
 		"Export Thinking Process Description": "Dışa aktarılan Markdown ve HTML dosyalarına modelin düşünme/akıl yürütme sürecini dahil et.",
 		"Export Sources": "Kaynakları Dışa Aktar",
 		"Export Sources Description": "Her yanıtın sonunda gösterilen kaynak listesini dışa aktarılan Markdown ve HTML dosyalarına dahil et.",
+		Images: "Görseller",
+		"Images Description": "Markdown ve JSON (ZIP) dışa aktarımlarında görsellerin nasıl kaydedileceği. Görseller çıkarıldığında Markdown yerine [image] gösterir. HTML görselleri her zaman gömer.",
+		"Images Embed": "Dosyaya göm (base64)",
+		"Images Omit": "Görselleri çıkar",
+		"Images Files": "Ayrı dosyalar olarak kaydet (.zip)",
 		Sources: "Kaynaklar",
 		"OpenAI Official Format": "OpenAI Resmi Format",
 		"Conversation Archive Alert": "Seçilen tüm konuşmaları arşivlemek istediğinizden emin misiniz?",
@@ -2114,6 +2165,11 @@
 		"Export Thinking Process Description": "在导出的 Markdown 和 HTML 文件中包含模型的思考/推理过程。",
 		"Export Sources": "导出来源",
 		"Export Sources Description": "在导出的 Markdown 和 HTML 文件中包含每个回答末尾显示的来源列表。",
+		Images: "图片",
+		"Images Description": "Markdown 和 JSON (ZIP) 导出时图片的保存方式。省略时，Markdown 会以 [image] 代替。HTML 始终嵌入图片。",
+		"Images Embed": "嵌入文件 (base64)",
+		"Images Omit": "省略图片",
+		"Images Files": "另存为单独文件 (.zip)",
 		Sources: "来源",
 		"OpenAI Official Format": "OpenAI 官方格式",
 		"Conversation Archive Alert": "确定要归档所有选取的对话？",
@@ -2182,6 +2238,11 @@
 		"Export Thinking Process Description": "在匯出的 Markdown 和 HTML 檔案中包含模型的思考/推理過程。",
 		"Export Sources": "匯出來源",
 		"Export Sources Description": "在匯出的 Markdown 和 HTML 檔案中包含每個回答末尾顯示的來源列表。",
+		Images: "圖片",
+		"Images Description": "Markdown 和 JSON (ZIP) 匯出時圖片的儲存方式。省略時，Markdown 會以 [image] 代替。HTML 一律嵌入圖片。",
+		"Images Embed": "嵌入檔案 (base64)",
+		"Images Omit": "省略圖片",
+		"Images Files": "另存為獨立檔案 (.zip)",
 		Sources: "來源",
 		"OpenAI Official Format": "OpenAI 官方格式",
 		"Conversation Archive Alert": "確定要封存所有選取的對話？",
@@ -2437,7 +2498,7 @@
 			i18n
 		};
 	}
-	var template_default = "<!DOCTYPE html>\n<html lang=\"{{lang}}\" data-theme=\"{{theme}}\">\n<head>\n    <meta charset=\"UTF-8\" />\n    <link rel=\"icon\" href=\"https://chat.openai.com/favicon.ico\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n    <title>{{title}}</title>\n    <link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/github-dark.min.css\" integrity=\"sha512-rO+olRTkcf304DQBxSWxln8JXCzTHlKnIdnMUwYvQa9/Jd4cQaNkItIUj6Z4nvW1dqK0SKXLbn9h4KwZTNtAyw==\" crossorigin=\"anonymous\" referrerpolicy=\"no-referrer\">\n    <script src=\"https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js\" integrity=\"sha512-bgHRAiTjGrzHzLyKOnpFvaEpGzJet3z4tZnXGjpsCcqOnAH6VGUx9frc5bcIhKTVLEiCO6vEhNAgx5jtLUYrfA==\" crossorigin=\"anonymous\" referrerpolicy=\"no-referrer\"><\/script>\n    <script>\n        hljs.highlightAll()\n    <\/script>\n    <link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.21/katex.min.css\" integrity=\"sha512-j+4buRc0VCpnAcYbe+UW/y6y3ySL9ORZGqzI9OnfQMfKnpwLP2V7Fm9fE+aaj7UKE5s7q87yCu7qGPD7zUFp+w==\" crossorigin=\"anonymous\" referrerpolicy=\"no-referrer\">\n    <script src=\"https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.21/katex.min.js\" integrity=\"sha512-jGjq63XP3PrAcXF6lp4bnZIwrVLGoqwh/4Rur2olg2TLt55eNVLjLCgPrrT07aTXxb0UkuMKlhxzfh5TBTACgQ==\" crossorigin=\"anonymous\" referrerpolicy=\"no-referrer\"><\/script>\n    <script src=\"https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.21/contrib/auto-render.min.js\" integrity=\"sha512-6bKDPShiPRjAcdeO8T6cedaVEi0pavPbzue/G/ZRiwVlurWZOSZ/vI9fr2lhk8IPXK7z51AZac+zBvZzgDJzDQ==\" crossorigin=\"anonymous\" referrerpolicy=\"no-referrer\"><\/script>\n    <script>\n        document.addEventListener(\"DOMContentLoaded\", function() {\n            renderMathInElement(document.body, {\n                delimiters: [\n                    { left: \"\\\\[\", right: \"\\\\]\", display: true },\n                    { left: \"\\\\(\", right: \"\\\\)\", display: false }\n                ],\n                throwOnError: false,\n                ignoredClasses: [\"no-katex\"]\n            });\n        });\n    <\/script>\n\n    <style>\n        :root {\n            --page-text: #0d0d0d;\n            --page-bg: #fff;\n            --td-borders: #374151;\n            --th-borders: #4b5563;\n            --tw-prose-code: var(--page-text);\n            --tw-prose-counters: #9b9b9b;\n            --tw-prose-headings: var(--page-text);\n            --tw-prose-hr: rgba(0,0,0,.25);\n            --tw-prose-links: var(--page-text);\n            --tw-prose-quotes: var(--page-text);\n            --meta-title: #616c77;\n        }\n\n        [data-theme=\"dark\"] {\n            --page-text: #ececec;\n            --page-bg: #212121;\n            --tw-prose-code: var(--page-text);\n            --tw-prose-counters: #9b9b9b;\n            --tw-prose-headings: var(--page-text);\n            --tw-prose-hr: hsla(0,0%,100%,.25);\n            --tw-prose-links: var(--page-text);\n            --tw-prose-quotes: var(--page-text);\n            --meta-title: #959faa;\n        }\n\n        * {\n            box-sizing: border-box;\n            font-size: 16px;\n        }\n\n        ::-webkit-scrollbar {\n            height: 1rem;\n            width: .5rem\n        }\n\n        ::-webkit-scrollbar:horizontal {\n            height: .5rem;\n            width: 1rem\n        }\n\n        ::-webkit-scrollbar-track {\n            background-color: transparent;\n            border-radius: 9999px\n        }\n\n        ::-webkit-scrollbar-thumb {\n            --tw-border-opacity: 1;\n            background-color: rgba(217,217,227,.8);\n            border-color: rgba(255,255,255,var(--tw-border-opacity));\n            border-radius: 9999px;\n            border-width: 1px\n        }\n\n        ::-webkit-scrollbar-thumb:hover {\n            --tw-bg-opacity: 1;\n            background-color: rgba(236,236,241,var(--tw-bg-opacity))\n        }\n\n        [data-theme=\"dark\"] ::-webkit-scrollbar-thumb {\n            --tw-bg-opacity: 1;\n            background-color: rgba(86,88,105,var(--tw-bg-opacity))\n        }\n\n        [data-theme=\"dark\"] ::-webkit-scrollbar-thumb:hover {\n            --tw-bg-opacity: 1;\n            background-color: rgba(172,172,190,var(--tw-bg-opacity))\n        }\n\n        @media (min-width: 768px) {\n            .scrollbar-trigger ::-webkit-scrollbar-thumb {\n                visibility:hidden\n            }\n\n            .scrollbar-trigger:hover ::-webkit-scrollbar-thumb {\n                visibility: visible\n            }\n        }\n\n        body {\n            font-family: Söhne,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif,Helvetica Neue,Arial,Apple Color Emoji,Segoe UI Emoji,Segoe UI Symbol,Noto Color Emoji;\n            font-size: 14px;\n            line-height: 1.5;\n            color: var(--page-text);\n            background-color: var(--page-bg);\n            margin: 0;\n            padding: 0;\n        }\n\n        [data-theme=\"light\"] .sun {\n            display: none;\n        }\n\n        [data-theme=\"dark\"] .moon {\n            display: none;\n        }\n\n        .toggle {\n            display: inline-flex;\n            justify-content: center;\n            align-items: center;\n            width: 32px;\n            height: 32px;\n            border-radius: 4px;\n            background-color: #fff;\n            border: 1px solid #e2e8f0;\n        }\n\n        [data-width=\"narrow\"] .width-toggle .expand {\n            display: block;\n        }\n\n        [data-width=\"wide\"] .width-toggle .narrow {\n            display: block;\n        }\n\n        .width-toggle {\n            display: inline-flex;\n            justify-content: center;\n            align-items: center;\n            width: 32px;\n            height: 32px;\n            border-radius: 4px;\n            background-color: #fff;\n            border: 1px solid #e2e8f0;\n            margin-left: 8px;\n            cursor: pointer;\n        }\n\n        .width-toggle svg {\n            display: none;\n        }\n\n        .metadata_container {\n            display: flex;\n            flex-direction: column;\n            margin-top: 8px;\n            padding-left: 1rem;\n        }\n\n        .metadata_item {\n            display: flex;\n            flex-direction: row;\n            align-items: center;\n            border-radius: 16px;\n            padding: 4px 0.5rem;\n        }\n\n        .metadata_item:hover {\n            background-color: rgba(0,0,0,.1);\n        }\n\n        .metadata_item > div:first-child {\n            flex: 0 1 100px;\n            color: var(--meta-title);\n        }\n\n        .metadata_item > div:last-child {\n            flex: 1;\n        }\n\n        a {\n            color: var(--tw-prose-links);\n            font-size: 0.8rem;\n            text-decoration-line: underline;\n            text-underline-offset: 2px;\n        }\n\n        .conversation-content > p:first-child,\n        ol:first-child {\n            margin-top: 0;\n        }\n\n        :not(pre)>code {\n            color: var(--tw-prose-code);\n            font-family: ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, monospace;\n            font-size: .92em;\n            background-color: rgba(0, 0, 0, .09);\n            border-radius: 6px;\n            padding: 1px 6px;\n        }\n\n        [data-theme=\"dark\"] :not(pre)>code {\n            background-color: rgba(255, 255, 255, .1);\n        }\n\n        hr {\n            width: 100%;\n            height: 0;\n            border: 1px solid var(--tw-prose-hr);\n            margin-bottom: 1em;\n            margin-top: 1em;\n        }\n\n        pre {\n            color: #ffffff;\n            background-color: #000000;\n            overflow-x: auto;\n            margin: 0 0 1rem 0;\n            padding: 1rem;\n            border-radius: 0.375rem;\n        }\n\n        /* The highlight.js theme pads and colors `code.hljs`, but only for languages it knows */\n        pre>code.hljs {\n            padding: 0;\n            background: none;\n        }\n\n        pre>code {\n            font-family: Söhne Mono, Monaco, Andale Mono, Ubuntu Mono, monospace !important;\n            font-weight: 400;\n            font-size: .875em;\n            line-height: 1.7142857;\n        }\n\n        h1, h2, h3, h4, h5, h6 {\n            color: var(--tw-prose-headings);\n            margin: 0;\n        }\n\n        h1 {\n            font-size: 2.25em;\n            font-weight: 600;\n            line-height: 1.1111111;\n            margin-bottom: 0.8888889em;\n            margin-top: 0;\n        }\n\n        h2 {\n            font-size: 1.5em;\n            font-weight: 700;\n            line-height: 1.3333333;\n            margin-bottom: 1em;\n            margin-top: 2em;\n        }\n\n        h3 {\n            font-size: 1.25em;\n            font-weight: 600;\n            line-height: 1.6;\n            margin-bottom: .6em;\n            margin-top: 1.6em;\n        }\n\n        h4 {\n            font-weight: 400;\n            line-height: 1.5;\n            margin-bottom: .5em;\n            margin-top: 1.5em\n        }\n\n        h3,h4 {\n            margin-bottom: .5rem;\n            margin-top: 1rem;\n        }\n\n        h5 {\n            font-weight: 600;\n        }\n\n        blockquote {\n            border-left: 2px solid rgba(142,142,160,1);\n            color: var(--tw-prose-quotes);\n            font-style: italic;\n            font-style: normal;\n            font-weight: 500;\n            line-height: 1rem;\n            margin: 1.6em 0;\n            padding-left: 1em;\n            quotes: \"\\201C\"\"\\201D\"\"\\2018\"\"\\2019\";\n        }\n\n        blockquote p:first-of-type:before {\n            content: open-quote;\n        }\n\n        blockquote p:last-of-type:after {\n            content: close-quote;\n        }\n\n        ol, ul {\n            padding-left: 1.1rem;\n        }\n\n        ::marker {\n            color: var(--tw-prose-counters);\n            font-weight: 400;\n        }\n\n        table {\n            width: 100%;\n            border-collapse: separate;\n            border-spacing: 0 0;\n            table-layout: auto;\n            text-align: left;\n            font-size: .875em;\n            line-height: 1.7142857;\n        }\n\n        table * {\n            box-sizing: border-box;\n            border-width: 0;\n            border-style: solid;\n            border-color: #d9d9e3;\n        }\n\n        table thead {\n            border-bottom-color: var(--th-borders);\n            border-bottom-width: 1px;\n        }\n\n        table th {\n            background-color: rgba(236,236,241,.2);\n            border-bottom-width: 1px;\n            border-left-width: 1px;\n            border-top-width: 1px;\n            padding: 0.25rem 0.75rem;\n        }\n\n        table th:first-child {\n            border-top-left-radius: 0.375rem;\n        }\n\n        table th:last-child {\n            border-right-width: 1px;\n            border-top-right-radius: 0.375rem;\n        }\n\n        table tbody tr {\n            border-bottom-color: var(--td-borders);\n            border-bottom-width: 1px;\n        }\n\n        table tbody tr:last-child {\n            border-bottom-width: 0;\n        }\n\n        table tbody tr:last-child td:first-child {\n            border-bottom-left-radius: 0.375rem;\n        }\n\n        table tbody tr:last-child td:last-child {\n            border-bottom-right-radius: 0.375rem;\n        }\n\n        table td {\n            border-bottom-width: 1px;\n            border-left-width: 1px;\n            padding: 0.25rem 0.75rem;\n        }\n\n        table td:last-child {\n            border-right-width: 1px;\n        }\n\n        [type=checkbox], [type=radio] {\n            accent-color: #2563eb;\n        }\n\n        .conversation {\n            margin: 0 auto;\n            padding: 1rem;\n            max-width: 64rem;\n        }\n\n        [data-width=\"narrow\"] .conversation {\n            max-width: 64rem;\n        }\n\n        [data-width=\"wide\"] .conversation {\n            max-width: 90%;\n        }\n\n        @media (min-width: 1280px) {\n            .conversation {\n                max-width: 48rem;\n            }\n        }\n\n        @media (min-width: 1024px) {\n            .conversation {\n                max-width: 40rem;\n            }\n        }\n\n        @media (min-width: 768px) {\n            .conversation {\n                max-width: 48rem;\n            }\n        }\n\n        .conversation-header {\n            margin-bottom: 1rem;\n        }\n\n        .conversation-header h1 {\n            margin: 0;\n        }\n\n        .conversation-header h1 a {\n            font-size: 1.5rem;\n        }\n\n        .conversation-header .conversation-export {\n            margin-top: 0.5rem;\n            font-size: 0.8rem;\n        }\n\n        .conversation-header p {\n            margin-top: 0.5rem;\n            font-size: 0.8rem;\n        }\n\n        .conversation-item {\n            display: flex;\n            position: relative;\n            padding: 1rem;\n            border-left: 1px solid rgba(0,0,0,.1);\n            border-right: 1px solid rgba(0,0,0,.1);\n            border-bottom: 1px solid rgba(0,0,0,.1);\n        }\n\n        .conversation-item:first-of-type {\n            border-top: 1px solid rgba(0,0,0,.1);\n        }\n\n        .author {\n            display: flex;\n            flex: 0 0 30px;\n            justify-content: center;\n            align-items: center;\n            width: 30px;\n            height: 30px;\n            border-radius: 0.125rem;\n            margin-right: 1rem;\n            overflow: hidden;\n        }\n\n        .author svg {\n            color: #fff;\n            width: 22px;\n            height: 22px;\n        }\n\n        .author img {\n            content: url({{avatar}});\n            width: 100%;\n            height: 100%;\n        }\n\n        .author.assistant {\n            background-color: rgb(16, 163, 127);\n        }\n\n        .conversation-content-wrapper {\n            display: flex;\n            position: relative;\n            overflow: hidden;\n            flex: 1 1 auto;\n            flex-direction: column;\n        }\n\n        .thinking {\n            font-size: 0.875rem;\n            line-height: 1.5;\n            margin-bottom: 0.75rem;\n            border: 1px solid #d1d5db;\n            border-radius: 0.5rem;\n            padding: 0.5rem 0.75rem;\n        }\n\n        .thinking summary {\n            cursor: pointer;\n            font-weight: 500;\n            color: #6b7280;\n        }\n\n        .thinking p {\n            margin: 0.5rem 0;\n            color: #6b7280;\n        }\n\n        [data-theme=\"dark\"] .thinking {\n            border-color: #4b5563;\n        }\n\n        [data-theme=\"dark\"] .thinking summary,\n        [data-theme=\"dark\"] .thinking p {\n            color: #9ca3af;\n        }\n\n        .conversation-content {\n            font-size: 1rem;\n            line-height: 1.5;\n        }\n\n        .conversation-content p {\n            white-space: pre-wrap;\n            line-height: 28px;\n        }\n\n        .conversation-content img, .conversation-content video {\n            display: block;\n            max-width: 100%;\n            height: auto;\n            margin-bottom: 2em;\n            margin-top: 2em;\n        }\n\n        .attachments {\n            list-style: none;\n            margin: 0.5rem 0 0;\n            padding: 0;\n            font-size: 0.875rem;\n            color: #6b7280;\n        }\n\n        [data-theme=\"dark\"] .attachments {\n            color: #9ca3af;\n        }\n\n        .time {\n            position: absolute;\n            right: 8px;\n            bottom: 0;\n            font-size: 0.8rem;\n            color: #acacbe\n        }\n\n    </style>\n</head>\n\n<body>\n    <svg aria-hidden=\"true\" style=\"position: absolute; width: 0; height: 0; overflow: hidden;\" version=\"1.1\" xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\">\n        <symbol id=\"chatgpt\" viewBox=\"0 0 41 41\">\n            <path d=\"M37.5324 16.8707C37.9808 15.5241 38.1363 14.0974 37.9886 12.6859C37.8409 11.2744 37.3934 9.91076 36.676 8.68622C35.6126 6.83404 33.9882 5.3676 32.0373 4.4985C30.0864 3.62941 27.9098 3.40259 25.8215 3.85078C24.8796 2.7893 23.7219 1.94125 22.4257 1.36341C21.1295 0.785575 19.7249 0.491269 18.3058 0.500197C16.1708 0.495044 14.0893 1.16803 12.3614 2.42214C10.6335 3.67624 9.34853 5.44666 8.6917 7.47815C7.30085 7.76286 5.98686 8.3414 4.8377 9.17505C3.68854 10.0087 2.73073 11.0782 2.02839 12.312C0.956464 14.1591 0.498905 16.2988 0.721698 18.4228C0.944492 20.5467 1.83612 22.5449 3.268 24.1293C2.81966 25.4759 2.66413 26.9026 2.81182 28.3141C2.95951 29.7256 3.40701 31.0892 4.12437 32.3138C5.18791 34.1659 6.8123 35.6322 8.76321 36.5013C10.7141 37.3704 12.8907 37.5973 14.9789 37.1492C15.9208 38.2107 17.0786 39.0587 18.3747 39.6366C19.6709 40.2144 21.0755 40.5087 22.4946 40.4998C24.6307 40.5054 26.7133 39.8321 28.4418 38.5772C30.1704 37.3223 31.4556 35.5506 32.1119 33.5179C33.5027 33.2332 34.8167 32.6547 35.9659 31.821C37.115 30.9874 38.0728 29.9178 38.7752 28.684C39.8458 26.8371 40.3023 24.6979 40.0789 22.5748C39.8556 20.4517 38.9639 18.4544 37.5324 16.8707ZM22.4978 37.8849C20.7443 37.8874 19.0459 37.2733 17.6994 36.1501C17.7601 36.117 17.8666 36.0586 17.936 36.0161L25.9004 31.4156C26.1003 31.3019 26.2663 31.137 26.3813 30.9378C26.4964 30.7386 26.5563 30.5124 26.5549 30.2825V19.0542L29.9213 20.998C29.9389 21.0068 29.9541 21.0198 29.9656 21.0359C29.977 21.052 29.9842 21.0707 29.9867 21.0902V30.3889C29.9842 32.375 29.1946 34.2791 27.7909 35.6841C26.3872 37.0892 24.4838 37.8806 22.4978 37.8849ZM6.39227 31.0064C5.51397 29.4888 5.19742 27.7107 5.49804 25.9832C5.55718 26.0187 5.66048 26.0818 5.73461 26.1244L13.699 30.7248C13.8975 30.8408 14.1233 30.902 14.3532 30.902C14.583 30.902 14.8088 30.8408 15.0073 30.7248L24.731 25.1103V28.9979C24.7321 29.0177 24.7283 29.0376 24.7199 29.0556C24.7115 29.0736 24.6988 29.0893 24.6829 29.1012L16.6317 33.7497C14.9096 34.7416 12.8643 35.0097 10.9447 34.4954C9.02506 33.9811 7.38785 32.7263 6.39227 31.0064ZM4.29707 13.6194C5.17156 12.0998 6.55279 10.9364 8.19885 10.3327C8.19885 10.4013 8.19491 10.5228 8.19491 10.6071V19.808C8.19351 20.0378 8.25334 20.2638 8.36823 20.4629C8.48312 20.6619 8.64893 20.8267 8.84863 20.9404L18.5723 26.5542L15.206 28.4979C15.1894 28.5089 15.1703 28.5155 15.1505 28.5173C15.1307 28.5191 15.1107 28.516 15.0924 28.5082L7.04046 23.8557C5.32135 22.8601 4.06716 21.2235 3.55289 19.3046C3.03862 17.3858 3.30624 15.3413 4.29707 13.6194ZM31.955 20.0556L22.2312 14.4411L25.5976 12.4981C25.6142 12.4872 25.6333 12.4805 25.6531 12.4787C25.6729 12.4769 25.6928 12.4801 25.7111 12.4879L33.7631 17.1364C34.9967 17.849 36.0017 18.8982 36.6606 20.1613C37.3194 21.4244 37.6047 22.849 37.4832 24.2684C37.3617 25.6878 36.8382 27.0432 35.9743 28.1759C35.1103 29.3086 33.9415 30.1717 32.6047 30.6641C32.6047 30.5947 32.6047 30.4733 32.6047 30.3889V21.188C32.6066 20.9586 32.5474 20.7328 32.4332 20.5338C32.319 20.3348 32.154 20.1698 31.955 20.0556ZM35.3055 15.0128C35.2464 14.9765 35.1431 14.9142 35.069 14.8717L27.1045 10.2712C26.906 10.1554 26.6803 10.0943 26.4504 10.0943C26.2206 10.0943 25.9948 10.1554 25.7963 10.2712L16.0726 15.8858V11.9982C16.0715 11.9783 16.0753 11.9585 16.0837 11.9405C16.0921 11.9225 16.1048 11.9068 16.1207 11.8949L24.1719 7.25025C25.4053 6.53903 26.8158 6.19376 28.2383 6.25482C29.6608 6.31589 31.0364 6.78077 32.2044 7.59508C33.3723 8.40939 34.2842 9.53945 34.8334 10.8531C35.3826 12.1667 35.5464 13.6095 35.3055 15.0128ZM14.2424 21.9419L10.8752 19.9981C10.8576 19.9893 10.8423 19.9763 10.8309 19.9602C10.8195 19.9441 10.8122 19.9254 10.8098 19.9058V10.6071C10.8107 9.18295 11.2173 7.78848 11.9819 6.58696C12.7466 5.38544 13.8377 4.42659 15.1275 3.82264C16.4173 3.21869 17.8524 2.99464 19.2649 3.1767C20.6775 3.35876 22.0089 3.93941 23.1034 4.85067C23.0427 4.88379 22.937 4.94215 22.8668 4.98473L14.9024 9.58517C14.7025 9.69878 14.5366 9.86356 14.4215 10.0626C14.3065 10.2616 14.2466 10.4877 14.2479 10.7175L14.2424 21.9419ZM16.071 17.9991L20.4018 15.4978L24.7325 17.9975V22.9985L20.4018 25.4983L16.071 22.9985V17.9991Z\" fill=\"currentColor\"></path>\n        </symbol>\n    </svg>\n    <div class=\"conversation\">\n        <div class=\"conversation-header\">\n            <h1>\n                <a href=\"{{source}}\" target=\"_blank\" rel=\"noopener noreferrer\">{{title}}</a>\n                <button class=\"toggle\">\n                    <svg class=\"sun\" stroke=\"currentColor\" fill=\"none\" stroke-width=\"2\" viewBox=\"0 0 24 24\" stroke-linecap=\"round\" stroke-linejoin=\"round\" class=\"w-4 h-4\" height=\"1em\" width=\"1em\" xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"12\" cy=\"12\" r=\"5\"></circle><line x1=\"12\" y1=\"1\" x2=\"12\" y2=\"3\"></line><line x1=\"12\" y1=\"21\" x2=\"12\" y2=\"23\"></line><line x1=\"4.22\" y1=\"4.22\" x2=\"5.64\" y2=\"5.64\"></line><line x1=\"18.36\" y1=\"18.36\" x2=\"19.78\" y2=\"19.78\"></line><line x1=\"1\" y1=\"12\" x2=\"3\" y2=\"12\"></line><line x1=\"21\" y1=\"12\" x2=\"23\" y2=\"12\"></line><line x1=\"4.22\" y1=\"19.78\" x2=\"5.64\" y2=\"18.36\"></line><line x1=\"18.36\" y1=\"5.64\" x2=\"19.78\" y2=\"4.22\"></line></svg>\n                    <svg class=\"moon\" stroke=\"currentColor\" fill=\"none\" stroke-width=\"2\" viewBox=\"0 0 24 24\" stroke-linecap=\"round\" stroke-linejoin=\"round\" class=\"w-4 h-4\" height=\"1em\" width=\"1em\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z\"></path></svg>\n                </button>\n                <button class=\"toggle width-toggle\">\n                    <svg class=\"expand\" stroke=\"currentColor\" fill=\"none\" stroke-width=\"2\" viewBox=\"0 0 24 24\" stroke-linecap=\"round\" stroke-linejoin=\"round\" class=\"w-4 h-4\" height=\"1em\" width=\"1em\" xmlns=\"http://www.w3.org/2000/svg\" style=\"display: block;\">\n                        <path d=\"M3 12h18M6 8l-4 4 4 4M18 8l4 4-4 4\"></path>\n                    </svg>\n                    <svg class=\"narrow\" stroke=\"currentColor\" fill=\"none\" stroke-width=\"2\" viewBox=\"0 0 24 24\" stroke-linecap=\"round\" stroke-linejoin=\"round\" class=\"w-4 h-4\" height=\"1em\" width=\"1em\" xmlns=\"http://www.w3.org/2000/svg\" style=\"display: none;\">\n                        <path d=\"M3 12h7M14 12h7M6 16l4-4-4-4M18 16l-4-4 4-4\"></path>\n                    </svg>\n                </button>\n            </h1>\n            <div class=\"conversation-export\">\n                <p>Exported by\n                <a href=\"https://github.com/pionxzh/chatgpt-exporter.git\">ChatGPT Exporter</a>\n                at {{time}}</p>\n            </div>\n            {{details}}\n        </div>\n\n        {{content}}\n    </div>\n\n\n    <script>\n        function toggleDarkMode(mode) {\n            const html = document.querySelector('html');\n            const isDarkMode = html.getAttribute('data-theme') === 'dark';\n            const newMode = mode || (isDarkMode ? 'light' : 'dark');\n            if (newMode !== 'dark' && newMode !== 'light') return;\n            html.setAttribute('data-theme', newMode);\n\n            const url = new URL(window.location);\n            url.searchParams.set('theme', newMode);\n            window.history.replaceState({}, '', url);\n        }\n        function toggleWidthMode(mode) {\n            const body = document.querySelector('body');\n            const widthToggleButton = document.querySelector('.width-toggle');\n            const isWide = body.getAttribute('data-width') === 'wide';\n            const newWidthMode = mode || (isWide ? 'narrow' : 'wide');\n            if (newWidthMode !== 'narrow' && newWidthMode !== 'wide') return;\n            body.setAttribute('data-width', newWidthMode);\n\n            const url = new URL(window.location);\n            url.searchParams.set('width', newWidthMode);\n            window.history.replaceState({}, '', url);\n\n            // Update the icon based on the current mode\n            const narrowIcon = widthToggleButton.querySelector('.narrow');\n            const expandIcon = widthToggleButton.querySelector('.expand');\n\n            if (newWidthMode === 'wide') {\n                expandIcon.style.display = \"none\";\n                narrowIcon.style.display = \"block\";\n            } else {\n                expandIcon.style.display = \"block\";\n                narrowIcon.style.display = \"none\";\n            }\n        }\n\n        const urlParams = new URLSearchParams(window.location.search);\n        const theme = urlParams.get('theme');\n        const width = urlParams.get('width');\n\n        if (theme) toggleDarkMode(theme);\n        if (width) toggleWidthMode(width);\n\n        document.querySelector('.toggle').addEventListener('click', () => toggleDarkMode());\n        document.querySelector('.width-toggle').addEventListener('click', () => toggleWidthMode());\n    <\/script>\n</body>\n\n</html>\n";
+	var template_default = "<!DOCTYPE html>\n<html lang=\"{{lang}}\" data-theme=\"{{theme}}\">\n<head>\n    <meta charset=\"UTF-8\" />\n    <link rel=\"icon\" href=\"https://chat.openai.com/favicon.ico\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n    <title>{{title}}</title>\n    <link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/github-dark.min.css\" integrity=\"sha512-rO+olRTkcf304DQBxSWxln8JXCzTHlKnIdnMUwYvQa9/Jd4cQaNkItIUj6Z4nvW1dqK0SKXLbn9h4KwZTNtAyw==\" crossorigin=\"anonymous\" referrerpolicy=\"no-referrer\">\n    <script src=\"https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js\" integrity=\"sha512-bgHRAiTjGrzHzLyKOnpFvaEpGzJet3z4tZnXGjpsCcqOnAH6VGUx9frc5bcIhKTVLEiCO6vEhNAgx5jtLUYrfA==\" crossorigin=\"anonymous\" referrerpolicy=\"no-referrer\"><\/script>\n    <script>\n        hljs.highlightAll()\n    <\/script>\n    <link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.18.2/katex.min.css\" integrity=\"sha512-BvPqebW0E1TH5NDiUuIRFcmCeFBs8EqXIT4+ZiEFN7FQf/XVd45U40/LuL6FxeUQEOBK36hI4/5BtX6sxgFcJw==\" crossorigin=\"anonymous\" referrerpolicy=\"no-referrer\">\n    <script src=\"https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.18.2/katex.min.js\" integrity=\"sha512-QDUcDUQTCeewvRKLECGllr/7dzhL111h4wll4WoWvr584DQDjR7vt3PWRltUQFDgwnEEEBj0zxLbnBLuFukBXg==\" crossorigin=\"anonymous\" referrerpolicy=\"no-referrer\"><\/script>\n    <script src=\"https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.18.2/contrib/auto-render.min.js\" integrity=\"sha512-0HzJcHCD+wBh9kNUUcm3DWH9IbNDfudsYyMD5EHwSuFK6aEsaa/UEPqqk4t0pm4bbmwR6A11yNsD7Q+nz6XF+Q==\" crossorigin=\"anonymous\" referrerpolicy=\"no-referrer\"><\/script>\n    <script>\n        document.addEventListener(\"DOMContentLoaded\", function() {\n            renderMathInElement(document.body, {\n                delimiters: [\n                    { left: \"\\\\[\", right: \"\\\\]\", display: true },\n                    { left: \"\\\\(\", right: \"\\\\)\", display: false }\n                ],\n                throwOnError: false,\n                ignoredClasses: [\"no-katex\"]\n            });\n        });\n    <\/script>\n\n    <style>\n        :root {\n            --page-text: #0d0d0d;\n            --page-bg: #fff;\n            --td-borders: #374151;\n            --th-borders: #4b5563;\n            --tw-prose-code: var(--page-text);\n            --tw-prose-counters: #9b9b9b;\n            --tw-prose-headings: var(--page-text);\n            --tw-prose-hr: rgba(0,0,0,.25);\n            --tw-prose-links: var(--page-text);\n            --tw-prose-quotes: var(--page-text);\n            --meta-title: #616c77;\n        }\n\n        [data-theme=\"dark\"] {\n            --page-text: #ececec;\n            --page-bg: #212121;\n            --tw-prose-code: var(--page-text);\n            --tw-prose-counters: #9b9b9b;\n            --tw-prose-headings: var(--page-text);\n            --tw-prose-hr: hsla(0,0%,100%,.25);\n            --tw-prose-links: var(--page-text);\n            --tw-prose-quotes: var(--page-text);\n            --meta-title: #959faa;\n        }\n\n        * {\n            box-sizing: border-box;\n            font-size: 16px;\n        }\n\n        ::-webkit-scrollbar {\n            height: 1rem;\n            width: .5rem\n        }\n\n        ::-webkit-scrollbar:horizontal {\n            height: .5rem;\n            width: 1rem\n        }\n\n        ::-webkit-scrollbar-track {\n            background-color: transparent;\n            border-radius: 9999px\n        }\n\n        ::-webkit-scrollbar-thumb {\n            --tw-border-opacity: 1;\n            background-color: rgba(217,217,227,.8);\n            border-color: rgba(255,255,255,var(--tw-border-opacity));\n            border-radius: 9999px;\n            border-width: 1px\n        }\n\n        ::-webkit-scrollbar-thumb:hover {\n            --tw-bg-opacity: 1;\n            background-color: rgba(236,236,241,var(--tw-bg-opacity))\n        }\n\n        [data-theme=\"dark\"] ::-webkit-scrollbar-thumb {\n            --tw-bg-opacity: 1;\n            background-color: rgba(86,88,105,var(--tw-bg-opacity))\n        }\n\n        [data-theme=\"dark\"] ::-webkit-scrollbar-thumb:hover {\n            --tw-bg-opacity: 1;\n            background-color: rgba(172,172,190,var(--tw-bg-opacity))\n        }\n\n        @media (min-width: 768px) {\n            .scrollbar-trigger ::-webkit-scrollbar-thumb {\n                visibility:hidden\n            }\n\n            .scrollbar-trigger:hover ::-webkit-scrollbar-thumb {\n                visibility: visible\n            }\n        }\n\n        body {\n            font-family: Söhne,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif,Helvetica Neue,Arial,Apple Color Emoji,Segoe UI Emoji,Segoe UI Symbol,Noto Color Emoji;\n            font-size: 14px;\n            line-height: 1.5;\n            color: var(--page-text);\n            background-color: var(--page-bg);\n            margin: 0;\n            padding: 0;\n        }\n\n        [data-theme=\"light\"] .sun {\n            display: none;\n        }\n\n        [data-theme=\"dark\"] .moon {\n            display: none;\n        }\n\n        .toggle {\n            display: inline-flex;\n            justify-content: center;\n            align-items: center;\n            width: 32px;\n            height: 32px;\n            border-radius: 4px;\n            background-color: #fff;\n            border: 1px solid #e2e8f0;\n        }\n\n        [data-width=\"narrow\"] .width-toggle .expand {\n            display: block;\n        }\n\n        [data-width=\"wide\"] .width-toggle .narrow {\n            display: block;\n        }\n\n        .width-toggle {\n            display: inline-flex;\n            justify-content: center;\n            align-items: center;\n            width: 32px;\n            height: 32px;\n            border-radius: 4px;\n            background-color: #fff;\n            border: 1px solid #e2e8f0;\n            margin-left: 8px;\n            cursor: pointer;\n        }\n\n        .width-toggle svg {\n            display: none;\n        }\n\n        .metadata_container {\n            display: flex;\n            flex-direction: column;\n            margin-top: 8px;\n            padding-left: 1rem;\n        }\n\n        .metadata_item {\n            display: flex;\n            flex-direction: row;\n            align-items: center;\n            border-radius: 16px;\n            padding: 4px 0.5rem;\n        }\n\n        .metadata_item:hover {\n            background-color: rgba(0,0,0,.1);\n        }\n\n        .metadata_item > div:first-child {\n            flex: 0 1 100px;\n            color: var(--meta-title);\n        }\n\n        .metadata_item > div:last-child {\n            flex: 1;\n        }\n\n        a {\n            color: var(--tw-prose-links);\n            font-size: 0.8rem;\n            text-decoration-line: underline;\n            text-underline-offset: 2px;\n        }\n\n        .conversation-content > p:first-child,\n        ol:first-child {\n            margin-top: 0;\n        }\n\n        :not(pre)>code {\n            color: var(--tw-prose-code);\n            font-family: ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, monospace;\n            font-size: .92em;\n            background-color: rgba(0, 0, 0, .09);\n            border-radius: 6px;\n            padding: 1px 6px;\n        }\n\n        [data-theme=\"dark\"] :not(pre)>code {\n            background-color: rgba(255, 255, 255, .1);\n        }\n\n        hr {\n            width: 100%;\n            height: 0;\n            border: 1px solid var(--tw-prose-hr);\n            margin-bottom: 1em;\n            margin-top: 1em;\n        }\n\n        pre {\n            color: #ffffff;\n            background-color: #000000;\n            overflow-x: auto;\n            margin: 0 0 1rem 0;\n            padding: 1rem;\n            border-radius: 0.375rem;\n        }\n\n        /* The highlight.js theme pads and colors `code.hljs`, but only for languages it knows */\n        pre>code.hljs {\n            padding: 0;\n            background: none;\n        }\n\n        pre>code {\n            font-family: Söhne Mono, Monaco, Andale Mono, Ubuntu Mono, monospace !important;\n            font-weight: 400;\n            font-size: .875em;\n            line-height: 1.7142857;\n        }\n\n        h1, h2, h3, h4, h5, h6 {\n            color: var(--tw-prose-headings);\n            margin: 0;\n        }\n\n        h1 {\n            font-size: 2.25em;\n            font-weight: 600;\n            line-height: 1.1111111;\n            margin-bottom: 0.8888889em;\n            margin-top: 0;\n        }\n\n        h2 {\n            font-size: 1.5em;\n            font-weight: 700;\n            line-height: 1.3333333;\n            margin-bottom: 1em;\n            margin-top: 2em;\n        }\n\n        h3 {\n            font-size: 1.25em;\n            font-weight: 600;\n            line-height: 1.6;\n            margin-bottom: .6em;\n            margin-top: 1.6em;\n        }\n\n        h4 {\n            font-weight: 400;\n            line-height: 1.5;\n            margin-bottom: .5em;\n            margin-top: 1.5em\n        }\n\n        h3,h4 {\n            margin-bottom: .5rem;\n            margin-top: 1rem;\n        }\n\n        h5 {\n            font-weight: 600;\n        }\n\n        blockquote {\n            border-left: 2px solid rgba(142,142,160,1);\n            color: var(--tw-prose-quotes);\n            font-style: italic;\n            font-style: normal;\n            font-weight: 500;\n            line-height: 1rem;\n            margin: 1.6em 0;\n            padding-left: 1em;\n            quotes: \"\\201C\"\"\\201D\"\"\\2018\"\"\\2019\";\n        }\n\n        blockquote p:first-of-type:before {\n            content: open-quote;\n        }\n\n        blockquote p:last-of-type:after {\n            content: close-quote;\n        }\n\n        ol, ul {\n            padding-left: 1.1rem;\n        }\n\n        ::marker {\n            color: var(--tw-prose-counters);\n            font-weight: 400;\n        }\n\n        table {\n            width: 100%;\n            border-collapse: separate;\n            border-spacing: 0 0;\n            table-layout: auto;\n            text-align: left;\n            font-size: .875em;\n            line-height: 1.7142857;\n        }\n\n        table * {\n            box-sizing: border-box;\n            border-width: 0;\n            border-style: solid;\n            border-color: #d9d9e3;\n        }\n\n        table thead {\n            border-bottom-color: var(--th-borders);\n            border-bottom-width: 1px;\n        }\n\n        table th {\n            background-color: rgba(236,236,241,.2);\n            border-bottom-width: 1px;\n            border-left-width: 1px;\n            border-top-width: 1px;\n            padding: 0.25rem 0.75rem;\n        }\n\n        table th:first-child {\n            border-top-left-radius: 0.375rem;\n        }\n\n        table th:last-child {\n            border-right-width: 1px;\n            border-top-right-radius: 0.375rem;\n        }\n\n        table tbody tr {\n            border-bottom-color: var(--td-borders);\n            border-bottom-width: 1px;\n        }\n\n        table tbody tr:last-child {\n            border-bottom-width: 0;\n        }\n\n        table tbody tr:last-child td:first-child {\n            border-bottom-left-radius: 0.375rem;\n        }\n\n        table tbody tr:last-child td:last-child {\n            border-bottom-right-radius: 0.375rem;\n        }\n\n        table td {\n            border-bottom-width: 1px;\n            border-left-width: 1px;\n            padding: 0.25rem 0.75rem;\n        }\n\n        table td:last-child {\n            border-right-width: 1px;\n        }\n\n        [type=checkbox], [type=radio] {\n            accent-color: #2563eb;\n        }\n\n        .conversation {\n            margin: 0 auto;\n            padding: 1rem;\n            max-width: 64rem;\n        }\n\n        [data-width=\"narrow\"] .conversation {\n            max-width: 64rem;\n        }\n\n        [data-width=\"wide\"] .conversation {\n            max-width: 90%;\n        }\n\n        @media (min-width: 1280px) {\n            .conversation {\n                max-width: 48rem;\n            }\n        }\n\n        @media (min-width: 1024px) {\n            .conversation {\n                max-width: 40rem;\n            }\n        }\n\n        @media (min-width: 768px) {\n            .conversation {\n                max-width: 48rem;\n            }\n        }\n\n        .conversation-header {\n            margin-bottom: 1rem;\n        }\n\n        .conversation-header h1 {\n            margin: 0;\n        }\n\n        .conversation-header h1 a {\n            font-size: 1.5rem;\n        }\n\n        .conversation-header .conversation-export {\n            margin-top: 0.5rem;\n            font-size: 0.8rem;\n        }\n\n        .conversation-header p {\n            margin-top: 0.5rem;\n            font-size: 0.8rem;\n        }\n\n        .conversation-item {\n            display: flex;\n            position: relative;\n            padding: 1rem;\n            border-left: 1px solid rgba(0,0,0,.1);\n            border-right: 1px solid rgba(0,0,0,.1);\n            border-bottom: 1px solid rgba(0,0,0,.1);\n        }\n\n        .conversation-item:first-of-type {\n            border-top: 1px solid rgba(0,0,0,.1);\n        }\n\n        .author {\n            display: flex;\n            flex: 0 0 30px;\n            justify-content: center;\n            align-items: center;\n            width: 30px;\n            height: 30px;\n            border-radius: 0.125rem;\n            margin-right: 1rem;\n            overflow: hidden;\n        }\n\n        .author svg {\n            color: #fff;\n            width: 22px;\n            height: 22px;\n        }\n\n        .author img {\n            content: url({{avatar}});\n            width: 100%;\n            height: 100%;\n        }\n\n        .author.assistant {\n            background-color: rgb(16, 163, 127);\n        }\n\n        .conversation-content-wrapper {\n            display: flex;\n            position: relative;\n            overflow: hidden;\n            flex: 1 1 auto;\n            flex-direction: column;\n        }\n\n        .thinking {\n            font-size: 0.875rem;\n            line-height: 1.5;\n            margin-bottom: 0.75rem;\n            border: 1px solid #d1d5db;\n            border-radius: 0.5rem;\n            padding: 0.5rem 0.75rem;\n        }\n\n        .thinking summary {\n            cursor: pointer;\n            font-weight: 500;\n            color: #6b7280;\n        }\n\n        .thinking p {\n            margin: 0.5rem 0;\n            color: #6b7280;\n        }\n\n        [data-theme=\"dark\"] .thinking {\n            border-color: #4b5563;\n        }\n\n        [data-theme=\"dark\"] .thinking summary,\n        [data-theme=\"dark\"] .thinking p {\n            color: #9ca3af;\n        }\n\n        .conversation-content {\n            font-size: 1rem;\n            line-height: 1.5;\n        }\n\n        .conversation-content p {\n            white-space: pre-wrap;\n            line-height: 28px;\n        }\n\n        .conversation-content img, .conversation-content video {\n            display: block;\n            max-width: 100%;\n            height: auto;\n            margin-bottom: 2em;\n            margin-top: 2em;\n        }\n\n        .attachments {\n            list-style: none;\n            margin: 0.5rem 0 0;\n            padding: 0;\n            font-size: 0.875rem;\n            color: #6b7280;\n        }\n\n        [data-theme=\"dark\"] .attachments {\n            color: #9ca3af;\n        }\n\n        .time {\n            position: absolute;\n            right: 8px;\n            bottom: 0;\n            font-size: 0.8rem;\n            color: #acacbe\n        }\n\n    </style>\n</head>\n\n<body>\n    <svg aria-hidden=\"true\" style=\"position: absolute; width: 0; height: 0; overflow: hidden;\" version=\"1.1\" xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\">\n        <symbol id=\"chatgpt\" viewBox=\"0 0 41 41\">\n            <path d=\"M37.5324 16.8707C37.9808 15.5241 38.1363 14.0974 37.9886 12.6859C37.8409 11.2744 37.3934 9.91076 36.676 8.68622C35.6126 6.83404 33.9882 5.3676 32.0373 4.4985C30.0864 3.62941 27.9098 3.40259 25.8215 3.85078C24.8796 2.7893 23.7219 1.94125 22.4257 1.36341C21.1295 0.785575 19.7249 0.491269 18.3058 0.500197C16.1708 0.495044 14.0893 1.16803 12.3614 2.42214C10.6335 3.67624 9.34853 5.44666 8.6917 7.47815C7.30085 7.76286 5.98686 8.3414 4.8377 9.17505C3.68854 10.0087 2.73073 11.0782 2.02839 12.312C0.956464 14.1591 0.498905 16.2988 0.721698 18.4228C0.944492 20.5467 1.83612 22.5449 3.268 24.1293C2.81966 25.4759 2.66413 26.9026 2.81182 28.3141C2.95951 29.7256 3.40701 31.0892 4.12437 32.3138C5.18791 34.1659 6.8123 35.6322 8.76321 36.5013C10.7141 37.3704 12.8907 37.5973 14.9789 37.1492C15.9208 38.2107 17.0786 39.0587 18.3747 39.6366C19.6709 40.2144 21.0755 40.5087 22.4946 40.4998C24.6307 40.5054 26.7133 39.8321 28.4418 38.5772C30.1704 37.3223 31.4556 35.5506 32.1119 33.5179C33.5027 33.2332 34.8167 32.6547 35.9659 31.821C37.115 30.9874 38.0728 29.9178 38.7752 28.684C39.8458 26.8371 40.3023 24.6979 40.0789 22.5748C39.8556 20.4517 38.9639 18.4544 37.5324 16.8707ZM22.4978 37.8849C20.7443 37.8874 19.0459 37.2733 17.6994 36.1501C17.7601 36.117 17.8666 36.0586 17.936 36.0161L25.9004 31.4156C26.1003 31.3019 26.2663 31.137 26.3813 30.9378C26.4964 30.7386 26.5563 30.5124 26.5549 30.2825V19.0542L29.9213 20.998C29.9389 21.0068 29.9541 21.0198 29.9656 21.0359C29.977 21.052 29.9842 21.0707 29.9867 21.0902V30.3889C29.9842 32.375 29.1946 34.2791 27.7909 35.6841C26.3872 37.0892 24.4838 37.8806 22.4978 37.8849ZM6.39227 31.0064C5.51397 29.4888 5.19742 27.7107 5.49804 25.9832C5.55718 26.0187 5.66048 26.0818 5.73461 26.1244L13.699 30.7248C13.8975 30.8408 14.1233 30.902 14.3532 30.902C14.583 30.902 14.8088 30.8408 15.0073 30.7248L24.731 25.1103V28.9979C24.7321 29.0177 24.7283 29.0376 24.7199 29.0556C24.7115 29.0736 24.6988 29.0893 24.6829 29.1012L16.6317 33.7497C14.9096 34.7416 12.8643 35.0097 10.9447 34.4954C9.02506 33.9811 7.38785 32.7263 6.39227 31.0064ZM4.29707 13.6194C5.17156 12.0998 6.55279 10.9364 8.19885 10.3327C8.19885 10.4013 8.19491 10.5228 8.19491 10.6071V19.808C8.19351 20.0378 8.25334 20.2638 8.36823 20.4629C8.48312 20.6619 8.64893 20.8267 8.84863 20.9404L18.5723 26.5542L15.206 28.4979C15.1894 28.5089 15.1703 28.5155 15.1505 28.5173C15.1307 28.5191 15.1107 28.516 15.0924 28.5082L7.04046 23.8557C5.32135 22.8601 4.06716 21.2235 3.55289 19.3046C3.03862 17.3858 3.30624 15.3413 4.29707 13.6194ZM31.955 20.0556L22.2312 14.4411L25.5976 12.4981C25.6142 12.4872 25.6333 12.4805 25.6531 12.4787C25.6729 12.4769 25.6928 12.4801 25.7111 12.4879L33.7631 17.1364C34.9967 17.849 36.0017 18.8982 36.6606 20.1613C37.3194 21.4244 37.6047 22.849 37.4832 24.2684C37.3617 25.6878 36.8382 27.0432 35.9743 28.1759C35.1103 29.3086 33.9415 30.1717 32.6047 30.6641C32.6047 30.5947 32.6047 30.4733 32.6047 30.3889V21.188C32.6066 20.9586 32.5474 20.7328 32.4332 20.5338C32.319 20.3348 32.154 20.1698 31.955 20.0556ZM35.3055 15.0128C35.2464 14.9765 35.1431 14.9142 35.069 14.8717L27.1045 10.2712C26.906 10.1554 26.6803 10.0943 26.4504 10.0943C26.2206 10.0943 25.9948 10.1554 25.7963 10.2712L16.0726 15.8858V11.9982C16.0715 11.9783 16.0753 11.9585 16.0837 11.9405C16.0921 11.9225 16.1048 11.9068 16.1207 11.8949L24.1719 7.25025C25.4053 6.53903 26.8158 6.19376 28.2383 6.25482C29.6608 6.31589 31.0364 6.78077 32.2044 7.59508C33.3723 8.40939 34.2842 9.53945 34.8334 10.8531C35.3826 12.1667 35.5464 13.6095 35.3055 15.0128ZM14.2424 21.9419L10.8752 19.9981C10.8576 19.9893 10.8423 19.9763 10.8309 19.9602C10.8195 19.9441 10.8122 19.9254 10.8098 19.9058V10.6071C10.8107 9.18295 11.2173 7.78848 11.9819 6.58696C12.7466 5.38544 13.8377 4.42659 15.1275 3.82264C16.4173 3.21869 17.8524 2.99464 19.2649 3.1767C20.6775 3.35876 22.0089 3.93941 23.1034 4.85067C23.0427 4.88379 22.937 4.94215 22.8668 4.98473L14.9024 9.58517C14.7025 9.69878 14.5366 9.86356 14.4215 10.0626C14.3065 10.2616 14.2466 10.4877 14.2479 10.7175L14.2424 21.9419ZM16.071 17.9991L20.4018 15.4978L24.7325 17.9975V22.9985L20.4018 25.4983L16.071 22.9985V17.9991Z\" fill=\"currentColor\"></path>\n        </symbol>\n    </svg>\n    <div class=\"conversation\">\n        <div class=\"conversation-header\">\n            <h1>\n                <a href=\"{{source}}\" target=\"_blank\" rel=\"noopener noreferrer\">{{title}}</a>\n                <button class=\"toggle\">\n                    <svg class=\"sun\" stroke=\"currentColor\" fill=\"none\" stroke-width=\"2\" viewBox=\"0 0 24 24\" stroke-linecap=\"round\" stroke-linejoin=\"round\" class=\"w-4 h-4\" height=\"1em\" width=\"1em\" xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"12\" cy=\"12\" r=\"5\"></circle><line x1=\"12\" y1=\"1\" x2=\"12\" y2=\"3\"></line><line x1=\"12\" y1=\"21\" x2=\"12\" y2=\"23\"></line><line x1=\"4.22\" y1=\"4.22\" x2=\"5.64\" y2=\"5.64\"></line><line x1=\"18.36\" y1=\"18.36\" x2=\"19.78\" y2=\"19.78\"></line><line x1=\"1\" y1=\"12\" x2=\"3\" y2=\"12\"></line><line x1=\"21\" y1=\"12\" x2=\"23\" y2=\"12\"></line><line x1=\"4.22\" y1=\"19.78\" x2=\"5.64\" y2=\"18.36\"></line><line x1=\"18.36\" y1=\"5.64\" x2=\"19.78\" y2=\"4.22\"></line></svg>\n                    <svg class=\"moon\" stroke=\"currentColor\" fill=\"none\" stroke-width=\"2\" viewBox=\"0 0 24 24\" stroke-linecap=\"round\" stroke-linejoin=\"round\" class=\"w-4 h-4\" height=\"1em\" width=\"1em\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z\"></path></svg>\n                </button>\n                <button class=\"toggle width-toggle\">\n                    <svg class=\"expand\" stroke=\"currentColor\" fill=\"none\" stroke-width=\"2\" viewBox=\"0 0 24 24\" stroke-linecap=\"round\" stroke-linejoin=\"round\" class=\"w-4 h-4\" height=\"1em\" width=\"1em\" xmlns=\"http://www.w3.org/2000/svg\" style=\"display: block;\">\n                        <path d=\"M3 12h18M6 8l-4 4 4 4M18 8l4 4-4 4\"></path>\n                    </svg>\n                    <svg class=\"narrow\" stroke=\"currentColor\" fill=\"none\" stroke-width=\"2\" viewBox=\"0 0 24 24\" stroke-linecap=\"round\" stroke-linejoin=\"round\" class=\"w-4 h-4\" height=\"1em\" width=\"1em\" xmlns=\"http://www.w3.org/2000/svg\" style=\"display: none;\">\n                        <path d=\"M3 12h7M14 12h7M6 16l4-4-4-4M18 16l-4-4 4-4\"></path>\n                    </svg>\n                </button>\n            </h1>\n            <div class=\"conversation-export\">\n                <p>Exported by\n                <a href=\"https://github.com/pionxzh/chatgpt-exporter.git\">ChatGPT Exporter</a>\n                at {{time}}</p>\n            </div>\n            {{details}}\n        </div>\n\n        {{content}}\n    </div>\n\n\n    <script>\n        function toggleDarkMode(mode) {\n            const html = document.querySelector('html');\n            const isDarkMode = html.getAttribute('data-theme') === 'dark';\n            const newMode = mode || (isDarkMode ? 'light' : 'dark');\n            if (newMode !== 'dark' && newMode !== 'light') return;\n            html.setAttribute('data-theme', newMode);\n\n            const url = new URL(window.location);\n            url.searchParams.set('theme', newMode);\n            window.history.replaceState({}, '', url);\n        }\n        function toggleWidthMode(mode) {\n            const body = document.querySelector('body');\n            const widthToggleButton = document.querySelector('.width-toggle');\n            const isWide = body.getAttribute('data-width') === 'wide';\n            const newWidthMode = mode || (isWide ? 'narrow' : 'wide');\n            if (newWidthMode !== 'narrow' && newWidthMode !== 'wide') return;\n            body.setAttribute('data-width', newWidthMode);\n\n            const url = new URL(window.location);\n            url.searchParams.set('width', newWidthMode);\n            window.history.replaceState({}, '', url);\n\n            // Update the icon based on the current mode\n            const narrowIcon = widthToggleButton.querySelector('.narrow');\n            const expandIcon = widthToggleButton.querySelector('.expand');\n\n            if (newWidthMode === 'wide') {\n                expandIcon.style.display = \"none\";\n                narrowIcon.style.display = \"block\";\n            } else {\n                expandIcon.style.display = \"block\";\n                narrowIcon.style.display = \"none\";\n            }\n        }\n\n        const urlParams = new URLSearchParams(window.location.search);\n        const theme = urlParams.get('theme');\n        const width = urlParams.get('width');\n\n        if (theme) toggleDarkMode(theme);\n        if (width) toggleWidthMode(width);\n\n        document.querySelector('.toggle').addEventListener('click', () => toggleDarkMode());\n        document.querySelector('.width-toggle').addEventListener('click', () => toggleWidthMode());\n    <\/script>\n</body>\n\n</html>\n";
 	var CitationMarkerRegex = /\uE200cite(?:\uE202[^\uE200\uE201]*)+\uE201/gu;
 	function normalizeCitationText(input) {
 		return input.replaceAll(/[\u00A0\u202F\u2007\u2060]/gu, " ").replaceAll(/[\u2010-\u2015\u2212]/gu, "-").replaceAll(/[\uE203\uE204]/gu, "");
@@ -2451,6 +2512,7 @@
 		const fileReplacements = new Set();
 		for (const ref of sortedRefs) {
 			if (!ref.matched_text) continue;
+			if (ref.type === "client_defined_widget" && ref.data?.widget_type === "code_block") continue;
 			const matchedText = normalizeCitationText(ref.matched_text);
 			if (!matchedText) continue;
 			const replacement = formatInlineReference(ref, outputType, inlineReferenceMode);
@@ -2476,6 +2538,7 @@
 		return `[${escapeMarkdownText(label)}](<${escapeMarkdownUrl(url)}>)`;
 	}
 	function formatInlineReference(ref, output, mode) {
+		if (ref.type === "client_defined_widget" && ref.data?.widget_type === "charts_widget_v2") return formatChart(ref.data.content);
 		if (mode === "alt") return formatAlt(ref.alt);
 		if (output === "markdown" && (ref.type === "image_group" || ref.type === "image_v2")) {
 			const images = formatImageResults(ref);
@@ -2498,6 +2561,20 @@
 			const page = image.url?.trim();
 			return page ? `[${markdown}](<${escapeMarkdownUrl(page)}>)` : markdown;
 		}).filter(Boolean).join("\n\n");
+	}
+	function formatChart(chart) {
+		const { meta, xKey, series = [], data = [], formattedData } = chart ?? {};
+		if (!xKey || series.length === 0 || data.length === 0) return "";
+		const cell = (value) => String(value ?? "").replaceAll("|", "\\|").replaceAll("\n", " ");
+		const row = (cells) => `| ${cells.map(cell).join(" | ")} |`;
+		const rows = data.map((point, index) => row([point[xKey], ...series.map(({ dataKey, valueSuffix = "" }) => formattedData?.[index]?.[dataKey] ?? (point[dataKey] == null ? "" : `${point[dataKey]}${valueSuffix}`))]));
+		const table = [
+			row([xKey, ...series.map(({ dataKey, label }) => label || dataKey)]),
+			row([xKey, ...series].map(() => "---")),
+			...rows
+		].join("\n");
+		const description = meta?.description?.trim();
+		return description ? `${description}\n\n${table}` : table;
 	}
 	function formatAlt(alt) {
 		return alt?.replaceAll(/\[([^\]]*)\]\(\)/g, "$1") ?? "";
@@ -11189,25 +11266,59 @@
 	var CJK_FONT_FACES = [
 		{
 			weight: "100 400",
-			names: ["PingFang TC", "PingFangTC-Regular"]
+			name: "PingFangTC-Regular"
 		},
 		{
 			weight: "500",
-			names: ["PingFangTC-Medium"]
+			name: "PingFangTC-Medium"
 		},
 		{
 			weight: "600 900",
-			names: ["PingFangTC-Semibold"]
+			name: "PingFangTC-Semibold"
 		}
-	].map(({ weight, names }) => `
+	].map(({ weight, name }) => `
     @font-face {
         font-family: "${CJK_FONT_FAMILY}";
-        src: ${names.map((name) => `local("${name}")`).join(", ")};
+        src: local("${name}");
         font-weight: ${weight};
         unicode-range: ${CJK_UNICODE_RANGE};
     }
 `).join("");
+	var CJK_PROBE_TEXT = "中文字寬測試一二三四五六七八九十";
+	var CJK_PROBE_TOLERANCE = 2;
+	async function measureCjkGap(root) {
+		const probe = document.createElement("span");
+		probe.textContent = CJK_PROBE_TEXT;
+		probe.style.cssText = "position: absolute; font-size: 16px; white-space: pre";
+		root.appendChild(probe);
+		const pageWidth = probe.getBoundingClientRect().width;
+		const { fontFamily, fontWeight } = getComputedStyle(probe);
+		probe.remove();
+		const scale = 2;
+		const width = Math.ceil(pageWidth) + 40;
+		const height = 32;
+		const lang = root.closest("[lang]")?.lang ?? "";
+		const style = `font-family: ${fontFamily}; font-weight: ${fontWeight}; font-size: 16px; white-space: pre; background: #f00; color: transparent`;
+		const img = await loadCorsImage(toSvgDataUrl(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" lang="${escapeHtml(lang)}"><span style="${escapeHtml(style)}">${CJK_PROBE_TEXT}</span></div></foreignObject></svg>`));
+		if (!img) return null;
+		try {
+			const canvas = document.createElement("canvas");
+			canvas.width = width * scale;
+			canvas.height = 64;
+			const ctx = canvas.getContext("2d");
+			if (!ctx) return null;
+			ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+			const { data } = ctx.getImageData(0, 16, canvas.width, 1);
+			let right = 0;
+			for (let x = 0; x < canvas.width; x++) if (data[x * 4] > 200 && data[x * 4 + 1] < 60 && data[x * 4 + 3] > 128) right = x + 1;
+			return right / scale - pageWidth;
+		} catch {
+			return null;
+		}
+	}
 	async function matchCjkMetrics(root) {
+		const gap = await measureCjkGap(root);
+		if (gap !== null && gap < CJK_PROBE_TOLERANCE) return;
 		const elements = [root, ...Array.from(root.querySelectorAll("*"))];
 		const families = new Map(elements.map((el) => [el, getComputedStyle(el).fontFamily]));
 		elements.forEach((el) => {
@@ -11633,7 +11744,7 @@
 		}
 		const effect = new Effect();
 		const isDarkMode = getColorScheme() === "dark";
-		const redesignedThread = document.querySelector(REDESIGNED_THREAD_SELECTOR);
+		const redesignedThread = Array.from(document.querySelectorAll(REDESIGNED_THREAD_SELECTOR)).find((thread) => thread.offsetHeight > 0);
 		const source = redesignedThread ? await prepareRedesignedThread(redesignedThread, effect, isDarkMode) : await prepareLegacyThread(effect, isDarkMode);
 		if (!source) {
 			effect.dispose();
@@ -11838,6 +11949,43 @@
 		if (oobaData.visible[0] && oobaData.visible[0][0] === "<|BEGIN-VISIBLE-CHAT|>") oobaData.visible[0][0] = "";
 		return JSON.stringify(oobaData, null, 2);
 	}
+	var ASSETS_DIR = "assets";
+	var IMAGE_EXTENSIONS = {
+		"image/jpeg": "jpg",
+		"image/png": "png",
+		"image/gif": "gif",
+		"image/webp": "webp",
+		"image/svg+xml": "svg"
+	};
+	function getImageMode() {
+		return ScriptStorage.get("exporter:image_mode") ?? "embed";
+	}
+	async function extractImageFiles(conversation, assets) {
+		const copy = structuredClone(conversation);
+		await replaceImageSources(copy, async (src) => {
+			const match = /^data:([^;,]*)[^,]*;base64,(.*)$/s.exec(src);
+			if (!match) return null;
+			const [, mimeType, base64] = match;
+			const ext = IMAGE_EXTENSIONS[mimeType.toLowerCase()] ?? "bin";
+			const name = `image-${await hashBase64(base64)}.${ext}`;
+			assets.set(name, base64);
+			return `${ASSETS_DIR}/${name}`;
+		});
+		return copy;
+	}
+	function addImageFilesToZip(zip, assets) {
+		assets.forEach((base64, name) => {
+			zip.file(`${ASSETS_DIR}/${name}`, base64, {
+				base64: true,
+				compression: "STORE"
+			});
+		});
+	}
+	async function hashBase64(base64) {
+		const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+		const digest = await crypto.subtle.digest("SHA-256", bytes);
+		return Array.from(new Uint8Array(digest).slice(0, 8), (b) => b.toString(16).padStart(2, "0")).join("");
+	}
 	async function exportToJson(fileNameFormat) {
 		if (!checkIfConversationStarted()) {
 			alert(i18n.t("Please start a conversation first"));
@@ -11872,6 +12020,34 @@
 		}), "application/json-lines", convertToTavern(conversation));
 		return true;
 	}
+	async function exportAllToTavern(fileNameFormat, apiConversations, _metaList, projectName, partIndex, totalParts) {
+		const zip = new jszip.default();
+		const filenameMap = new Map();
+		apiConversations.map((x) => processConversation(x)).forEach((conversation) => {
+			let fileName = getFileNameWithFormat(`${fileNameFormat}.tavern`, "jsonl", {
+				title: conversation.title,
+				chatId: conversation.id,
+				createTime: conversation.createTime,
+				updateTime: conversation.updateTime
+			});
+			if (filenameMap.has(fileName)) {
+				const count = filenameMap.get(fileName) ?? 1;
+				filenameMap.set(fileName, count + 1);
+				fileName = `${fileName.slice(0, -13)} (${count}).tavern.jsonl`;
+			} else filenameMap.set(fileName, 1);
+			zip.file(fileName, convertToTavern(conversation));
+		});
+		const blob = await zip.generateAsync({
+			type: "blob",
+			compression: "DEFLATE",
+			compressionOptions: { level: 9 }
+		});
+		downloadFile(buildZipFileName("tavern", projectName, partIndex != null && totalParts != null ? {
+			part: partIndex,
+			total: totalParts
+		} : void 0), "application/zip", blob);
+		return true;
+	}
 	async function exportToOoba(fileNameFormat) {
 		if (!checkIfConversationStarted()) {
 			alert(i18n.t("Please start a conversation first"));
@@ -11901,7 +12077,8 @@
 	async function exportAllToJson(fileNameFormat, apiConversations, _metaList, projectName, partIndex, totalParts) {
 		const zip = new jszip.default();
 		const filenameMap = new Map();
-		apiConversations.forEach((rawConversation) => {
+		const assets = new Map();
+		(getImageMode() === "files" ? await Promise.all(apiConversations.map((x) => extractImageFiles(x, assets))) : apiConversations).forEach((rawConversation) => {
 			let fileName = getFileNameWithFormat(fileNameFormat, "json", {
 				title: rawConversation.title || "ChatGPT Conversation",
 				chatId: rawConversation.id,
@@ -11916,6 +12093,7 @@
 			const content = conversationToJson(rawConversation);
 			zip.file(fileName, content);
 		});
+		addImageFilesToZip(zip, assets);
 		const blob = await zip.generateAsync({
 			type: "blob",
 			compression: "DEFLATE",
@@ -11930,6 +12108,9 @@
 	function conversationToJson(conversation) {
 		return JSON.stringify(conversation);
 	}
+	function loadImages(conversation, imageMode) {
+		return imageMode === "omit" ? Promise.resolve(conversation) : withImageAssets(conversation);
+	}
 	async function exportToMarkdown(fileNameFormat, metaList) {
 		if (!checkIfConversationStarted()) {
 			alert(i18n.t("Please start a conversation first"));
@@ -11940,21 +12121,36 @@
 			return false;
 		}
 		const chatId = await getCurrentChatId();
-		const conversation = processConversation(await withImageAssets(await fetchConversation(chatId)), { enableThinking: ScriptStorage.get("exporter:enable_thinking") ?? false });
-		const markdown = conversationToMarkdown(conversation, metaList);
-		downloadFile(getFileNameWithFormat(fileNameFormat, "md", {
+		const imageMode = getImageMode();
+		const assets = new Map();
+		let rawConversation = await loadImages(await fetchConversation(chatId), imageMode);
+		if (imageMode === "files") rawConversation = await extractImageFiles(rawConversation, assets);
+		const enableThinking = ScriptStorage.get("exporter:enable_thinking") ?? false;
+		const conversation = processConversation(rawConversation, { enableThinking });
+		const markdown = standardizeLineBreaks(conversationToMarkdown(conversation, metaList, imageMode));
+		const fileName = getFileNameWithFormat(fileNameFormat, "md", {
 			title: conversation.title,
 			chatId,
 			createTime: conversation.createTime,
 			updateTime: conversation.updateTime
-		}), "text/markdown", standardizeLineBreaks(markdown));
+		});
+		if (assets.size === 0) {
+			downloadFile(fileName, "text/markdown", markdown);
+			return true;
+		}
+		const zip = new jszip.default();
+		zip.file(fileName, markdown);
+		addImageFilesToZip(zip, assets);
+		downloadFile(fileName.replace(/\.md$/, ".zip"), "application/zip", await generateZip(zip));
 		return true;
 	}
 	async function exportAllToMarkdown(fileNameFormat, apiConversations, metaList, projectName, partIndex, totalParts) {
 		const zip = new jszip.default();
 		const filenameMap = new Map();
 		const enableThinking = ScriptStorage.get("exporter:enable_thinking") ?? false;
-		apiConversations.map((x) => processConversation(x, { enableThinking })).forEach((conversation) => {
+		const imageMode = getImageMode();
+		const assets = new Map();
+		(imageMode === "files" ? await Promise.all(apiConversations.map((x) => extractImageFiles(x, assets))) : apiConversations).map((x) => processConversation(x, { enableThinking })).forEach((conversation) => {
 			let fileName = getFileNameWithFormat(fileNameFormat, "md", {
 				title: conversation.title,
 				chatId: conversation.id,
@@ -11966,21 +12162,25 @@
 				filenameMap.set(fileName, count + 1);
 				fileName = `${fileName.slice(0, -3)} (${count}).md`;
 			} else filenameMap.set(fileName, 1);
-			const content = conversationToMarkdown(conversation, metaList);
+			const content = conversationToMarkdown(conversation, metaList, imageMode);
 			zip.file(fileName, content);
 		});
-		const blob = await zip.generateAsync({
-			type: "blob",
-			compression: "DEFLATE",
-			compressionOptions: { level: 9 }
-		});
+		addImageFilesToZip(zip, assets);
+		const blob = await generateZip(zip);
 		downloadFile(buildZipFileName("markdown", projectName, partIndex != null && totalParts != null ? {
 			part: partIndex,
 			total: totalParts
 		} : void 0), "application/zip", blob);
 		return true;
 	}
-	function conversationToMarkdown(conversation, metaList) {
+	function generateZip(zip) {
+		return zip.generateAsync({
+			type: "blob",
+			compression: "DEFLATE",
+			compressionOptions: { level: 9 }
+		});
+	}
+	function conversationToMarkdown(conversation, metaList, imageMode) {
 		const { id, title, conversationNodes } = conversation;
 		const _metaList = resolveMetaList(metaList, getMetaVariables(conversation, `${baseUrl}/c/${id}`)).map(([name, val]) => `${name}: ${val}`);
 		const frontMatter = _metaList.length > 0 ? `---\n${_metaList.join("\n")}\n---\n\n` : "";
@@ -11988,6 +12188,7 @@
 		const timeStampMarkdown = ScriptStorage.get("exporter:timestamp_markdown") ?? false;
 		const timeStamp24H = ScriptStorage.get("exporter:timestamp_24h") ?? false;
 		const enableSources = ScriptStorage.get("exporter:enable_sources") ?? true;
+		const renderImage = imageMode === "omit" ? () => "[image]" : (src) => `![image](${src})`;
 		return `${frontMatter}# ${title}\n\n${conversationNodes.map(({ message, thinking }) => {
 			if (!message || !message.content) return null;
 			if (shouldSkipMessageInExport(message)) return null;
@@ -12018,7 +12219,7 @@
 				return restore(toMarkdown(fromMarkdown(text), text));
 			});
 			const postProcess = (input) => postSteps.reduce((acc, fn) => fn(acc), input);
-			const content = transformContent$1(message.content, message.metadata, postProcess);
+			const content = transformContent$1(message.content, message.metadata, postProcess, renderImage);
 			const attachments = getFileAttachmentNames(message).map((name) => `- 📎 ${name}`).join("\n");
 			const attachmentsBlock = attachments ? `\n\n${attachments}` : "";
 			return `#### ${author}:\n${timestampHtml}${thinkingBlock}${content}${attachmentsBlock}`;
@@ -12038,12 +12239,12 @@
 			return `[^${citation.metadata?.extra?.cited_message_idx ?? 1}]: ${citation.metadata?.title ?? "No title"}`;
 		}).join("\n")}`;
 	}
-	function transformContent$1(content, metadata, postProcess) {
+	function transformContent$1(content, metadata, postProcess, renderImage) {
 		switch (content.content_type) {
 			case "text": return postProcess(content.parts?.join("\n") || "");
 			case "code": return postProcess(`Code:\n\`\`\`\n${content.text}\n\`\`\``);
 			case "execution_output":
-				if (metadata?.aggregate_result?.messages) return metadata.aggregate_result.messages.filter((msg) => msg.message_type === "image").map((msg) => `![image](${msg.image_url})`).join("\n");
+				if (metadata?.aggregate_result?.messages) return metadata.aggregate_result.messages.filter((msg) => msg.message_type === "image").map((msg) => renderImage(msg.image_url)).join("\n");
 				return postProcess(`Result:\n\`\`\`\n${content.text}\n\`\`\`` || "");
 			case "tether_quote": return postProcess(`> ${content.title || content.text || ""}`);
 			case "tether_browsing_code": return postProcess("");
@@ -12054,7 +12255,7 @@
 			}
 			case "multimodal_text": return content.parts?.map((part) => {
 				if (typeof part === "string") return postProcess(part);
-				if (part.content_type === "image_asset_pointer") return `![image](${part.asset_pointer})`;
+				if (part.content_type === "image_asset_pointer") return renderImage(part.asset_pointer);
 				if (part.content_type === "audio_transcription") return `[audio] ${part.text}`;
 				if (part.content_type === "audio_asset_pointer") return null;
 				if (part.content_type === "real_time_user_audio_video_asset_pointer") return null;
@@ -12742,6 +12943,7 @@
 	}
 	var defaultFormat = "ChatGPT-{title}";
 	var defaultExportAllLimit = 200;
+	var defaultImageMode = "embed";
 	var defaultExportMetaList = [{
 		name: "title",
 		value: "{title}"
@@ -12768,6 +12970,8 @@
 		setEnableThinking: (_) => {},
 		enableSources: true,
 		setEnableSources: (_) => {},
+		imageMode: defaultImageMode,
+		setImageMode: (_) => {},
 		exportAllLimit: defaultExportAllLimit,
 		setExportAllLimit: (_) => {},
 		resetDefault: () => {}
@@ -12782,6 +12986,7 @@
 		const [exportMetaList, setExportMetaList] = useGMStorage(KEY_META_LIST, defaultExportMetaList);
 		const [enableThinking, setEnableThinking] = useGMStorage(KEY_THINKING_ENABLED, false);
 		const [enableSources, setEnableSources] = useGMStorage(KEY_SOURCES_ENABLED, true);
+		const [imageMode, setImageMode] = useGMStorage(KEY_IMAGE_MODE, defaultImageMode);
 		const [exportAllLimit, setExportAllLimit] = useGMStorage(KEY_EXPORT_ALL_LIMIT, defaultExportAllLimit);
 		const resetDefault = T$1(() => {
 			setFormat(defaultFormat);
@@ -12790,6 +12995,7 @@
 			setExportMetaList(defaultExportMetaList);
 			setEnableThinking(false);
 			setEnableSources(true);
+			setImageMode(defaultImageMode);
 			setExportAllLimit(defaultExportAllLimit);
 		}, [
 			setFormat,
@@ -12798,6 +13004,7 @@
 			setExportMetaList,
 			setEnableThinking,
 			setEnableSources,
+			setImageMode,
 			setExportAllLimit
 		]);
 		const value = F$1(() => ({
@@ -12819,6 +13026,8 @@
 			setEnableThinking,
 			enableSources,
 			setEnableSources,
+			imageMode,
+			setImageMode,
 			exportAllLimit,
 			setExportAllLimit,
 			resetDefault
@@ -12841,6 +13050,8 @@
 			setEnableThinking,
 			enableSources,
 			setEnableSources,
+			imageMode,
+			setImageMode,
 			exportAllLimit,
 			setExportAllLimit,
 			resetDefault
@@ -13162,7 +13373,7 @@
 	};
 	var DialogContent = ({ format, onClose }) => {
 		const { t } = useTranslation();
-		const { enableMeta, exportMetaList, exportAllLimit } = useSettingContext();
+		const { enableMeta, exportMetaList, exportAllLimit, imageMode } = useSettingContext();
 		const metaList = F$1(() => enableMeta ? exportMetaList : [], [enableMeta, exportMetaList]);
 		const exportAllOptions = F$1(() => [
 			{
@@ -13180,6 +13391,10 @@
 			{
 				label: "JSON (ZIP)",
 				callback: exportAllToJson
+			},
+			{
+				label: "TavernAI JSONL (ZIP)",
+				callback: exportAllToTavern
 			}
 		], []);
 		const fileInputRef = _$1(null);
@@ -13261,12 +13476,16 @@
 								conversation
 							});
 						}
-						return exportType === "JSON" ? conversation : withImageAssets(conversation);
+						return exportType === "JSON" || exportType === "TavernAI JSONL (ZIP)" || imageMode === "omit" && (exportType === "Markdown" || exportType === "JSON (ZIP)") ? conversation : withImageAssets(conversation);
 					}
 				});
 			});
 			requestQueue.start();
-		}, [requestQueue, exportType]);
+		}, [
+			requestQueue,
+			exportType,
+			imageMode
+		]);
 		p(() => {
 			const off = requestQueue.on("progress", (prog) => {
 				setProcessing(true);
@@ -13723,37 +13942,38 @@
 			}),
 			o("div", {
 				className: "ce-action-bar",
-				children: [
-					o("select", {
-						className: "ce-select",
-						disabled: processing,
-						value: exportType,
-						onChange: (e) => setExportType(e.currentTarget.value),
-						children: exportAllOptions.map(({ label }) => o("option", {
-							value: label,
-							children: label
-						}, t(label)))
-					}),
-					o("div", { className: "ce-spacer" }),
-					o("button", {
-						className: "ce-button ce-button-red",
-						disabled: disabled || exportSource === "Local",
-						onClick: archiveAll,
-						children: t("Archive")
-					}),
-					o("button", {
-						className: "ce-button ce-button-red",
-						disabled: disabled || exportSource === "Local",
-						onClick: deleteAll,
-						children: t("Delete")
-					}),
-					o("button", {
-						className: "ce-button ce-button-green",
-						disabled,
-						onClick: exportAll,
-						children: t("Export")
-					})
-				]
+				children: [o("select", {
+					className: "ce-select",
+					disabled: processing,
+					value: exportType,
+					onChange: (e) => setExportType(e.currentTarget.value),
+					children: exportAllOptions.map(({ label }) => o("option", {
+						value: label,
+						children: label
+					}, t(label)))
+				}), o("div", {
+					className: "ce-action-buttons",
+					children: [
+						o("button", {
+							className: "ce-button ce-button-red",
+							disabled: disabled || exportSource === "Local",
+							onClick: archiveAll,
+							children: t("Archive")
+						}),
+						o("button", {
+							className: "ce-button ce-button-red",
+							disabled: disabled || exportSource === "Local",
+							onClick: deleteAll,
+							children: t("Delete")
+						}),
+						o("button", {
+							className: "ce-button ce-button-green",
+							disabled,
+							onClick: exportAll,
+							children: t("Export")
+						})
+					]
+				})]
 			}),
 			totalBatches > 1 && !processing && o("p", {
 				className: "ce-batch-note",
@@ -13936,6 +14156,7 @@
 		});
 		return o(k$1, { children: [o("div", {
 			ref: triggerRef,
+			"data-state": open ? "open" : "closed",
 			onPointerEnter,
 			onPointerLeave,
 			children: trigger
@@ -14034,7 +14255,7 @@
 		});
 	}
 	var SettingDialog = ({ open, onOpenChange }) => {
-		const { format, setFormat, enableTimestamp, setEnableTimestamp, timeStamp24H, setTimeStamp24H, enableTimestampHTML, setEnableTimestampHTML, enableTimestampMarkdown, setEnableTimestampMarkdown, enableMeta, setEnableMeta, exportMetaList, setExportMetaList, enableThinking, setEnableThinking, enableSources, setEnableSources, exportAllLimit, setExportAllLimit } = useSettingContext();
+		const { format, setFormat, enableTimestamp, setEnableTimestamp, timeStamp24H, setTimeStamp24H, enableTimestampHTML, setEnableTimestampHTML, enableTimestampMarkdown, setEnableTimestampMarkdown, enableMeta, setEnableMeta, exportMetaList, setExportMetaList, enableThinking, setEnableThinking, enableSources, setEnableSources, imageMode, setImageMode, exportAllLimit, setExportAllLimit } = useSettingContext();
 		const { t, i18n } = useTranslation();
 		const _title = useTitle();
 		const date = dateStr();
@@ -14177,6 +14398,38 @@
 										onCheckedUpdate: setEnableSources
 									})
 								})]
+							}),
+							o("div", {
+								className: "ce-setting-card",
+								children: o("div", { children: [
+									o("dt", {
+										className: "ce-setting-title",
+										children: t("Images")
+									}),
+									o("dd", {
+										className: "ce-setting-desc",
+										children: t("Images Description")
+									}),
+									o("dd", { children: o("select", {
+										className: "ce-select ce-setting-select",
+										value: imageMode,
+										onChange: (e) => setImageMode(e.currentTarget.value),
+										children: [
+											o("option", {
+												value: "embed",
+												children: t("Images Embed")
+											}),
+											o("option", {
+												value: "omit",
+												children: t("Images Omit")
+											}),
+											o("option", {
+												value: "files",
+												children: t("Images Files")
+											})
+										]
+									}) })
+								] })
 							}),
 							o("div", {
 								className: "ce-setting-card",
@@ -14393,12 +14646,12 @@
 		});
 	};
 	_css("/*\n * The exporter owns all of its styles. The only things it takes from\n * ChatGPT are the theme variables below, each with a fallback so the UI\n * still works when ChatGPT renames or drops one, and the light/dark switch.\n */\n\nhtml {\n    --ce-text-primary: var(--color-text-primary, #0d0d0d);\n    --ce-text-secondary: var(--color-text-secondary, #5d5d5d);\n    --ce-text-tertiary: var(--color-text-tertiary, #8f8f8f);\n    --ce-border: var(--color-token-border-default, #0000001a);\n    --ce-border-light: var(--color-token-border-light, #0000000d);\n    --ce-hover: var(--color-token-list-hover-background, #0000000d);\n    /* ChatGPT's switches use this, and it follows the accent in Appearance. */\n    --ce-accent: var(--color-chart-blue, #3a83f7);\n    --ce-menu-arrow: var(--sidebar-surface-secondary, #ececec);\n\n    --ce-control-border: #6f6e77;\n    --ce-menu-surface: #ffffff;\n    --ce-menu-border: #0d0d0d26;\n    --ce-dialog-surface: #f3f3f3;\n    --ce-dialog-surface-plain: #ffffff;\n    --ce-card-surface: #ffffff;\n    --ce-input-surface: #fafafa;\n    --ce-track: rgb(229 231 235);\n    --ce-list-header-surface: #f9fafb;\n}\n\n:is(.dark, [data-theme=\"dark\"]) {\n    --ce-text-primary: var(--color-text-primary, #ededed);\n    --ce-text-secondary: var(--color-text-secondary, #cdcdcd);\n    --ce-text-tertiary: var(--color-text-tertiary, #afafaf);\n    --ce-border: var(--color-token-border-default, #ffffff26);\n    --ce-border-light: var(--color-token-border-light, #ffffff0d);\n    --ce-hover: var(--color-token-list-hover-background, #ffffff1a);\n    --ce-menu-arrow: var(--sidebar-surface-secondary, #212121);\n\n    --ce-menu-surface: #2a2a2a;\n    --ce-menu-border: var(--color-token-border-default, #ffffff26);\n    --ce-dialog-surface: #2a2a2a;\n    --ce-dialog-surface-plain: #2a2a2a;\n    --ce-card-surface: rgb(255 255 255 / 5%);\n    --ce-input-surface: #2f2f2f;\n    --ce-track: rgb(255 255 255 / 10%);\n    --ce-list-header-surface: #1f2937;\n}\n\n/*\n * Reset everything under our roots, so ChatGPT's base styles neither help\n * nor break us. :where() keeps it at zero specificity, so any of our own\n * class rules win over it.\n */\n:where(.ce-root, .ce-root *, .ce-root ::before, .ce-root ::after) {\n    box-sizing: border-box;\n    margin: 0;\n    padding: 0;\n    border: 0 solid;\n}\n\n:where(.ce-root :is(button, input, select, textarea)) {\n    font: inherit;\n    color: inherit;\n}\n\n/* A background drops the native look of a range input, so leave it alone. */\n:where(.ce-root :is(button, input:not([type=\"range\"]), select, textarea)) {\n    background-color: transparent;\n}\n\n:where(.ce-root :is(button, select, [role=\"button\"])) {\n    cursor: pointer;\n}\n\n:where(.ce-root :is(ul, ol)) {\n    list-style: none;\n}\n\n:where(.ce-root svg) {\n    display: block;\n    flex-shrink: 0;\n}\n\n:where(.ce-root [hidden]) {\n    display: none;\n}\n\n.ce-icon {\n    width: 1rem;\n    height: 1rem;\n}\n\n.ce-icon-sm {\n    width: 0.75rem;\n    height: 0.75rem;\n}\n\n.ce-icon-md {\n    width: 1.25rem;\n    height: 1.25rem;\n}\n\n.ce-icon-lg {\n    width: 1.5rem;\n    height: 1.5rem;\n}\n\n.ce-hstack {\n    display: flex;\n    align-items: center;\n    gap: 0.5rem;\n}\n\n.ce-mt-2 {\n    margin-top: 0.5rem;\n}\n\n.ce-truncate {\n    overflow: hidden;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n@keyframes ce-fade-in {\n    from {\n        opacity: 0;\n    }\n    to {\n        opacity: 1;\n    }\n}\n\n@keyframes ce-slide-up {\n    from {\n        transform: translateY(100%);\n    }\n    to {\n        transform: translateY(0);\n    }\n}\n\n@keyframes ce-pointer-fade-in {\n    from {\n        opacity: 0;\n        pointer-events: none;\n    }\n    to {\n        opacity: 1;\n        pointer-events: auto;\n    }\n}\n\n@keyframes ce-rotate {\n    from {\n        transform: rotate(0deg);\n    }\n    to {\n        transform: rotate(360deg);\n    }\n}\n\n@keyframes ce-circular-dash {\n    0% {\n        stroke-dasharray: 1px, 200px;\n        stroke-dashoffset: 0;\n    }\n    50% {\n        stroke-dasharray: 100px, 200px;\n        stroke-dashoffset: -15px;\n    }\n    100% {\n        stroke-dasharray: 100px, 200px;\n        stroke-dashoffset: -125px;\n    }\n}\n");
-	_css(".ce-timestamp {\n    display: block;\n    width: 100%;\n    font-size: 0.875rem;\n    line-height: 1.25rem;\n    text-align: right;\n    color: var(--ce-text-tertiary);\n}\n\nspan[data-time-format] {\n    display: none;\n}\n\nbody[data-time-format=\"12\"] span[data-time-format=\"12\"] {\n    display: inline;\n}\n\nbody[data-time-format=\"24\"] span[data-time-format=\"24\"] {\n    display: inline;\n}\n\n.ce-menu-item {\n    display: flex;\n    flex-shrink: 0;\n    align-items: center;\n    gap: 12px;\n    height: 46px;\n    border: 1px solid var(--ce-menu-border);\n    border-radius: 8px;\n    cursor: pointer;\n    transition: background-color 0.2s;\n}\n\n.ce-menu-item[disabled] {\n    filter: brightness(0.5);\n}\n\n.ce-menu-item:not([disabled]):hover {\n    background-color: var(--ce-hover);\n}\n\n.ce-menu-item-loading {\n    display: flex;\n    align-items: center;\n    justify-content: center;\n    width: 100%;\n    height: 100%;\n}\n\n.ce-nav-trigger {\n    min-width: 0;\n    border: 0;\n    color: var(--ce-text-primary);\n}\n\n.ce-nav-trigger .ce-menu-item-text {\n    overflow: hidden;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n/* Same box as ChatGPT's sidebar rows, so the icon lines up with theirs. */\n.ce-nav-trigger-expanded {\n    margin: 0 0 8px;\n    padding-inline: 10px;\n}\n\n.ce-nav-trigger-collapsed {\n    width: 32px;\n    height: 32px;\n    margin: 0 auto 0.5rem;\n    padding: 0;\n    justify-content: center;\n    gap: 0;\n    border-radius: 8px;\n    color: var(--ce-text-secondary);\n}\n\n.ce-nav-trigger-collapsed .ce-menu-item-text {\n    display: none;\n}\n\n.ce-divider {\n    height: 1px;\n    background-color: var(--ce-border-light);\n}\n\n.ce-card {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 4px;\n    padding: 8px 4px;\n    color: var(--ce-text-primary);\n    background-color: var(--ce-menu-surface);\n    border-radius: 1rem;\n    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);\n    transition: opacity 0.2s;\n    animation: ce-fade-in 0.3s;\n}\n\n.ce-card-mobile {\n    animation: ce-slide-up 0.3s;\n}\n\n:is(.dark, [data-theme=\"dark\"]) .ce-card {\n    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.3);\n}\n\n.ce-card .ce-menu-item {\n    column-gap: 8px;\n    padding-inline-start: 8px;\n}\n\n.ce-dialog .ce-menu-item {\n    padding-inline-start: 8px;\n}\n\n/* HoverCard sets left/top. ChatGPT's main column carries its own z-index,\n   so raise the card above it. Dialogs sit in the top layer, above this. */\n.ce-card {\n    position: fixed;\n    z-index: 999;\n}\n\n.ce-card-arrow {\n    position: absolute;\n    left: -8px;\n    fill: var(--ce-menu-arrow);\n    stroke: var(--ce-menu-border);\n}\n\n.ce-row-half {\n    grid-column: auto / span 1;\n}\n\n.ce-row-full {\n    grid-column: auto / span 2;\n}\n\n.ce-backdrop {\n    display: block;\n    position: fixed;\n    inset: 0;\n    background-color: rgba(0, 0, 0, 0.5);\n    animation: ce-pointer-fade-in 0.3s;\n}\n");
-	_css("/* Native <dialog>: the backdrop replaces a separate overlay element. */\n.ce-dialog::backdrop {\n    background-color: rgba(0, 0, 0, 0.44);\n    animation: ce-fade-in 150ms cubic-bezier(0.16, 1, 0.3, 1);\n}\n\n.ce-dialog {\n    color: var(--ce-text-primary);\n    background-color: var(--ce-dialog-surface);\n    border-radius: 6px;\n    box-shadow: hsl(206 22% 7% / 35%) 0px 10px 38px -10px, hsl(206 22% 7% / 20%) 0px 10px 20px -15px;\n    position: fixed;\n    /* The UA sheet sets inset: 0 and margin: auto on a modal <dialog>. */\n    inset: 50% auto auto 50%;\n    margin: 0;\n    border: 0;\n    transform: translate(-50%, -50%);\n    width: 90vw;\n    max-width: 560px;\n    max-height: 85vh;\n    overflow: hidden;\n    padding: 16px 24px;\n    outline: none;\n    animation: ce-content-show 150ms cubic-bezier(0.16, 1, 0.3, 1);\n    display: flex;\n    flex-direction: column;\n}\n\n/* display: flex above would otherwise show a closed <dialog>. */\n.ce-dialog:not([open]) {\n    display: none;\n}\n\n.ce-dialog-plain {\n    background-color: var(--ce-dialog-surface-plain);\n}\n\n:is(.dark, [data-theme=\"dark\"]) .ce-dialog {\n    border: 1px solid #40414f;\n}\n\n.ce-dialog-title {\n    margin: 0 0 16px 0;\n    font-weight: 500;\n    font-size: 20px;\n    line-height: 1.5;\n    flex-shrink: 0;\n}\n\n.ce-dialog-body {\n    flex: 1;\n    min-height: 0;\n    overflow-y: auto;\n    overflow-x: hidden;\n}\n\n.ce-dialog-footer {\n    display: flex;\n    flex-shrink: 0;\n    justify-content: flex-end;\n    padding-top: 16px;\n}\n\n.ce-button {\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    border-radius: 4px;\n    padding: 0 15px;\n    font-size: 15px;\n    line-height: 1;\n    height: 35px;\n}\n.ce-button-strong {\n    font-weight: 700;\n}\n.ce-button-green {\n    background-color: #ddf3e4;\n    color: #18794e;\n}\n.ce-button-green:hover {\n    background-color: #ccebd7;\n}\n.ce-button-red {\n    background-color: #f9d9d9;\n    color: #a71d2a;\n}\n.ce-button-neutral {\n    color: #6f6e77;\n    border: 1px solid #6f6e77;\n    font-size: 13px;\n    height: 26px;\n    padding: 0 8px;\n}\n.ce-button-neutral:hover {\n    background-color: rgba(111, 110, 119, 0.1);\n}\n:is(.dark, [data-theme=\"dark\"]) .ce-button-neutral {\n    color: #a0a0a8;\n    border-color: #a0a0a8;\n}\n:is(.dark, [data-theme=\"dark\"]) .ce-button-neutral:hover {\n    background-color: rgba(160, 160, 168, 0.1);\n}\n.ce-button:disabled,\n.ce-button:disabled:hover {\n    opacity: 0.5;\n    color: #6f6e77;\n    background-color: #e0e0e0;\n    cursor: not-allowed;\n}\n\n.ce-icon-button {\n    border-radius: 100%;\n    height: 25px;\n    width: 25px;\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    color: var(--ce-text-secondary);\n}\n.ce-icon-button:hover {\n    background-color: var(--ce-hover);\n}\n\n.ce-close-button {\n    position: absolute;\n    top: 10px;\n    right: 10px;\n}\n\n.ce-input {\n    width: 100%;\n    flex: 1;\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    border-radius: 4px;\n    padding: 0 10px;\n    font-size: 15px;\n    line-height: 1;\n    color: var(--ce-text-primary);\n    background-color: var(--ce-input-surface);\n    box-shadow: 0 0 0 1px var(--ce-control-border);\n    height: 35px;\n    outline: none;\n}\n\n.ce-select {\n    appearance: none;\n    height: 2rem;\n    padding: 0 2rem 0 0.5rem;\n    width: auto;\n    min-width: 7.5rem;\n    border-radius: 4px;\n    color: var(--ce-text-primary);\n    background-color: var(--ce-input-surface);\n    /* Our own chevron, since appearance: none drops the native one. */\n    background-image: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%238f8f8f' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E\");\n    background-repeat: no-repeat;\n    background-position: right 0.5rem center;\n    background-size: 1rem;\n    box-shadow: 0 0 0 1px var(--ce-control-border);\n}\n\n.ce-select:disabled {\n    opacity: 0.6;\n    cursor: not-allowed;\n}\n\n/* ── Export dialog ── */\n\n.ce-export-source {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    padding-bottom: 12px;\n    margin-bottom: 12px;\n    border-bottom: 1px solid var(--ce-border);\n    color: var(--ce-text-secondary);\n}\n\n.ce-project-select {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    margin-bottom: 12px;\n    color: var(--ce-text-secondary);\n}\n\n.ce-select-search {\n    width: 100%;\n    padding: 8px 16px;\n    border: 1px solid var(--ce-control-border);\n    border-bottom: none;\n    border-radius: 4px 4px 0 0;\n    font-size: 14px;\n    outline: none;\n    flex-shrink: 0;\n}\n.ce-select-search::placeholder {\n    color: var(--ce-text-tertiary);\n}\n\n.ce-select-toolbar {\n    display: flex;\n    align-items: center;\n    /* Minimum breathing room between the select-all label and the right\n       group once the auto margin collapses under pressure */\n    gap: 12px;\n    padding: 12px 16px;\n    border: 1px solid var(--ce-control-border);\n    border-bottom: none;\n    flex-shrink: 0;\n}\n\n/* CJK labels wrap per-character when the row is squeezed — never shrink it */\n.ce-select-toolbar .ce-checkbox {\n    white-space: nowrap;\n    flex-shrink: 0;\n}\n\n.ce-select-toolbar-end {\n    display: flex;\n    align-items: center;\n    gap: 8px;\n    margin-left: auto;\n    min-width: 0;\n}\n\n.ce-toolbar-loading {\n    display: flex;\n    align-items: center;\n    gap: 4px;\n    min-width: 0;\n    overflow: hidden;\n    white-space: nowrap;\n    font-size: 0.875rem;\n    color: var(--ce-text-tertiary);\n}\n\n.ce-toolbar-status {\n    flex-shrink: 0;\n    height: auto;\n    font-size: 0.75rem;\n    padding: 2px 2rem 2px 0.5rem;\n    width: 8.5rem;\n    text-overflow: ellipsis;\n}\n\n.ce-toolbar-hint {\n    min-width: 0;\n    overflow: hidden;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n    font-size: 0.75rem;\n    color: var(--ce-text-tertiary);\n    /* Highest shrink factor: the hint collapses before the loading\n       indicator starts truncating */\n    flex-shrink: 99;\n}\n\n.ce-toolbar-count {\n    flex-shrink: 0;\n    white-space: nowrap;\n    font-size: 0.875rem;\n    font-weight: 500;\n    font-variant-numeric: tabular-nums;\n    color: var(--ce-text-tertiary);\n}\n\n.ce-select-list {\n    position: relative;\n    width: 100%;\n    flex: 1;\n    min-height: 120px;\n    padding: 12px 16px;\n    overflow-x: hidden;\n    overflow-y: auto;\n    border: 1px solid var(--ce-control-border);\n    border-radius: 0 0 4px 4px;\n    white-space: nowrap;\n}\n\n.ce-select-item {\n    display: flex;\n    align-items: center;\n    gap: 6px;\n    overflow: hidden;\n}\n\n.ce-select-item-empty {\n    color: var(--ce-text-tertiary);\n}\n\n.ce-select-item .ce-checkbox {\n    flex: 1;\n    min-width: 0;\n}\n\n.ce-select-item .ce-checkbox-label {\n    overflow: hidden;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.ce-starred {\n    flex-shrink: 0;\n    color: #f59e0b;\n}\n\n.ce-select-item-meta {\n    flex-shrink: 0;\n    font-size: 0.7rem;\n    color: var(--ce-text-tertiary);\n    white-space: nowrap;\n    font-variant-numeric: tabular-nums;\n    min-width: 6.5rem;\n    text-align: right;\n}\n.ce-select-item-meta-active {\n    color: var(--ce-text-secondary);\n    font-weight: 600;\n}\n\n/* ── Sortable column header row ── */\n.ce-list-header {\n    display: flex;\n    align-items: center;\n    padding: 0 16px;\n    border: 1px solid var(--ce-control-border);\n    border-bottom: none;\n    background: var(--ce-list-header-surface);\n    user-select: none;\n    flex-shrink: 0;\n}\n\n.ce-list-header-cell {\n    flex-shrink: 0;\n    font-size: 0.68rem;\n    font-weight: 600;\n    color: var(--ce-text-tertiary);\n    letter-spacing: 0.03em;\n    text-transform: uppercase;\n    padding: 5px 4px;\n    white-space: nowrap;\n    min-width: 6.5rem;\n    text-align: right;\n}\n.ce-list-header-cell:hover {\n    color: var(--ce-text-primary);\n}\n.ce-list-header-cell-title {\n    flex: 1;\n    text-align: left;\n    padding-left: 28px; /* align with checkbox label */\n}\n.ce-list-header-cell-active {\n    color: var(--ce-accent);\n}\n\n.ce-load-more {\n    display: flex;\n    align-items: center;\n    justify-content: center;\n    gap: 8px;\n    margin: 8px 0 4px;\n}\n\n.ce-muted-count {\n    font-size: 0.75rem;\n    font-variant-numeric: tabular-nums;\n    color: var(--ce-text-tertiary);\n}\n\n.ce-action-bar {\n    display: flex;\n    flex-wrap: wrap;\n    align-items: center;\n    gap: 8px;\n    margin-top: 12px;\n}\n\n.ce-action-bar > .ce-select {\n    flex-shrink: 0;\n}\n\n.ce-spacer {\n    flex-grow: 1;\n}\n\n.ce-batch-note {\n    margin-top: 6px;\n    font-size: 0.75rem;\n    text-align: right;\n    color: var(--ce-text-tertiary);\n}\n\n.ce-progress-header {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 8px;\n    margin: 8px 0 4px;\n}\n\n.ce-progress-name {\n    overflow: hidden;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n    font-size: 0.875rem;\n    color: var(--ce-text-secondary);\n}\n\n.ce-progress-count {\n    flex-shrink: 0;\n    font-size: 0.875rem;\n    font-variant-numeric: tabular-nums;\n    color: var(--ce-text-tertiary);\n}\n\n.ce-progress {\n    width: 100%;\n    height: 10px;\n    margin-bottom: 16px;\n    border-radius: 9999px;\n    background-color: var(--ce-track);\n}\n\n.ce-progress-bar {\n    height: 100%;\n    border-radius: 9999px;\n    background-color: var(--ce-accent);\n}\n\n.ce-progress-bar-waiting {\n    background-color: #f59e0b;\n}\n\n@media (max-width: 480px) {\n    .ce-dialog { max-height: 90vh; }\n    .ce-list-header-cell:last-child { display: none; }\n    .ce-select-item-meta:last-child { display: none; }\n    .ce-action-bar { justify-content: flex-end; }\n    .ce-action-bar > .ce-select { width: 100%; }\n    .ce-action-bar > .ce-spacer { display: none; }\n}\n\n@keyframes ce-content-show {\n    from {\n        opacity: 0;\n        transform: translate(-50%, -48%) scale(0.96);\n    }\n    to {\n        opacity: 1;\n        transform: translate(-50%, -50%) scale(1);\n    }\n}\n");
+	_css(".ce-timestamp {\n    display: block;\n    width: 100%;\n    font-size: 0.875rem;\n    line-height: 1.25rem;\n    text-align: right;\n    color: var(--ce-text-tertiary);\n}\n\nspan[data-time-format] {\n    display: none;\n}\n\nbody[data-time-format=\"12\"] span[data-time-format=\"12\"] {\n    display: inline;\n}\n\nbody[data-time-format=\"24\"] span[data-time-format=\"24\"] {\n    display: inline;\n}\n\n.ce-menu-item {\n    display: flex;\n    flex-shrink: 0;\n    align-items: center;\n    gap: 12px;\n    height: 46px;\n    border: 1px solid var(--ce-menu-border);\n    border-radius: 8px;\n    cursor: pointer;\n    transition: background-color 0.2s;\n}\n\n.ce-menu-item[disabled] {\n    filter: brightness(0.5);\n}\n\n.ce-menu-item:not([disabled]):hover {\n    background-color: var(--ce-hover);\n}\n\n.ce-menu-item-loading {\n    display: flex;\n    align-items: center;\n    justify-content: center;\n    width: 100%;\n    height: 100%;\n}\n\n.ce-nav-trigger {\n    min-width: 0;\n    border: 0;\n    color: var(--ce-text-primary);\n}\n\n/* Mark the trigger while its menu is open, like ChatGPT's selected rail items. */\n[data-state=\"open\"] > .ce-nav-trigger {\n    color: var(--ce-text-primary);\n    background-color: var(--ce-hover);\n}\n\n.ce-nav-trigger .ce-menu-item-text {\n    overflow: hidden;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n/* Same box as ChatGPT's sidebar rows, so the icon lines up with theirs. */\n.ce-nav-trigger-expanded {\n    margin: 0 0 8px;\n    padding-inline: 10px;\n}\n\n.ce-nav-trigger-collapsed {\n    width: 32px;\n    height: 32px;\n    margin: 0 auto 0.5rem;\n    padding: 0;\n    justify-content: center;\n    gap: 0;\n    border-radius: 8px;\n    color: var(--ce-text-secondary);\n}\n\n.ce-nav-trigger-collapsed .ce-menu-item-text {\n    display: none;\n}\n\n.ce-divider {\n    height: 1px;\n    background-color: var(--ce-border-light);\n}\n\n.ce-card {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 4px;\n    padding: 8px;\n    color: var(--ce-text-primary);\n    background-color: var(--ce-menu-surface);\n    border-radius: 1rem;\n    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);\n    transition: opacity 0.2s;\n    animation: ce-fade-in 0.3s;\n}\n\n.ce-card-mobile {\n    animation: ce-slide-up 0.3s;\n}\n\n:is(.dark, [data-theme=\"dark\"]) .ce-card {\n    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.3);\n}\n\n.ce-card .ce-menu-item {\n    column-gap: 8px;\n    padding-inline: 8px;\n}\n\n.ce-dialog .ce-menu-item {\n    padding-inline-start: 8px;\n}\n\n/* HoverCard sets left/top. ChatGPT's main column carries its own z-index,\n   so raise the card above it. Dialogs sit in the top layer, above this. */\n.ce-card {\n    position: fixed;\n    z-index: 999;\n}\n\n.ce-card-arrow {\n    position: absolute;\n    left: -8px;\n    fill: var(--ce-menu-arrow);\n    stroke: var(--ce-menu-border);\n}\n\n.ce-row-half {\n    grid-column: auto / span 1;\n}\n\n.ce-row-full {\n    grid-column: auto / span 2;\n}\n\n.ce-backdrop {\n    display: block;\n    position: fixed;\n    inset: 0;\n    background-color: rgba(0, 0, 0, 0.5);\n    animation: ce-pointer-fade-in 0.3s;\n}\n");
+	_css("/* Native <dialog>: the backdrop replaces a separate overlay element. */\n.ce-dialog::backdrop {\n    background-color: rgba(0, 0, 0, 0.44);\n    animation: ce-fade-in 150ms cubic-bezier(0.16, 1, 0.3, 1);\n}\n\n.ce-dialog {\n    color: var(--ce-text-primary);\n    background-color: var(--ce-dialog-surface);\n    border-radius: 6px;\n    box-shadow: hsl(206 22% 7% / 35%) 0px 10px 38px -10px, hsl(206 22% 7% / 20%) 0px 10px 20px -15px;\n    position: fixed;\n    /* The UA sheet sets inset: 0 and margin: auto on a modal <dialog>. */\n    inset: 50% auto auto 50%;\n    margin: 0;\n    border: 0;\n    transform: translate(-50%, -50%);\n    width: 90vw;\n    max-width: 560px;\n    max-height: 85vh;\n    overflow: hidden;\n    padding: 16px 24px;\n    outline: none;\n    animation: ce-content-show 150ms cubic-bezier(0.16, 1, 0.3, 1);\n    display: flex;\n    flex-direction: column;\n}\n\n/* display: flex above would otherwise show a closed <dialog>. */\n.ce-dialog:not([open]) {\n    display: none;\n}\n\n.ce-dialog-plain {\n    background-color: var(--ce-dialog-surface-plain);\n}\n\n:is(.dark, [data-theme=\"dark\"]) .ce-dialog {\n    border: 1px solid #40414f;\n}\n\n.ce-dialog-title {\n    margin: 0 0 16px 0;\n    font-weight: 500;\n    font-size: 20px;\n    line-height: 1.5;\n    flex-shrink: 0;\n}\n\n.ce-dialog-body {\n    flex: 1;\n    min-height: 0;\n    overflow-y: auto;\n    overflow-x: hidden;\n}\n\n.ce-dialog-footer {\n    display: flex;\n    flex-shrink: 0;\n    justify-content: flex-end;\n    padding-top: 16px;\n}\n\n.ce-button {\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    border-radius: 4px;\n    padding: 0 15px;\n    font-size: 15px;\n    line-height: 1;\n    height: 35px;\n}\n.ce-button-strong {\n    font-weight: 700;\n}\n.ce-button-green {\n    background-color: #ddf3e4;\n    color: #18794e;\n}\n.ce-button-green:hover {\n    background-color: #ccebd7;\n}\n.ce-button-red {\n    background-color: #f9d9d9;\n    color: #a71d2a;\n}\n.ce-button-neutral {\n    color: #6f6e77;\n    border: 1px solid #6f6e77;\n    font-size: 13px;\n    height: 26px;\n    padding: 0 8px;\n}\n.ce-button-neutral:hover {\n    background-color: rgba(111, 110, 119, 0.1);\n}\n:is(.dark, [data-theme=\"dark\"]) .ce-button-neutral {\n    color: #a0a0a8;\n    border-color: #a0a0a8;\n}\n:is(.dark, [data-theme=\"dark\"]) .ce-button-neutral:hover {\n    background-color: rgba(160, 160, 168, 0.1);\n}\n.ce-button:disabled,\n.ce-button:disabled:hover {\n    opacity: 0.5;\n    color: #6f6e77;\n    background-color: #e0e0e0;\n    cursor: not-allowed;\n}\n\n.ce-icon-button {\n    border-radius: 100%;\n    height: 25px;\n    width: 25px;\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    color: var(--ce-text-secondary);\n}\n.ce-icon-button:hover {\n    background-color: var(--ce-hover);\n}\n\n.ce-close-button {\n    position: absolute;\n    top: 10px;\n    right: 10px;\n}\n\n.ce-input {\n    width: 100%;\n    flex: 1;\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    border-radius: 4px;\n    padding: 0 10px;\n    font-size: 15px;\n    line-height: 1;\n    color: var(--ce-text-primary);\n    background-color: var(--ce-input-surface);\n    box-shadow: 0 0 0 1px var(--ce-control-border);\n    height: 35px;\n    outline: none;\n}\n\n.ce-select {\n    appearance: none;\n    height: 2rem;\n    padding: 0 2rem 0 0.5rem;\n    width: auto;\n    min-width: 7.5rem;\n    border-radius: 4px;\n    color: var(--ce-text-primary);\n    background-color: var(--ce-input-surface);\n    /* Our own chevron, since appearance: none drops the native one. */\n    background-image: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%238f8f8f' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E\");\n    background-repeat: no-repeat;\n    background-position: right 0.5rem center;\n    background-size: 1rem;\n    box-shadow: 0 0 0 1px var(--ce-control-border);\n}\n\n.ce-select:disabled {\n    opacity: 0.6;\n    cursor: not-allowed;\n}\n\n/* ── Export dialog ── */\n\n.ce-export-source {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    padding-bottom: 12px;\n    margin-bottom: 12px;\n    border-bottom: 1px solid var(--ce-border);\n    color: var(--ce-text-secondary);\n}\n\n.ce-project-select {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    margin-bottom: 12px;\n    color: var(--ce-text-secondary);\n}\n\n.ce-select-search {\n    width: 100%;\n    padding: 8px 16px;\n    border: 1px solid var(--ce-control-border);\n    border-bottom: none;\n    border-radius: 4px 4px 0 0;\n    font-size: 14px;\n    outline: none;\n    flex-shrink: 0;\n}\n.ce-select-search::placeholder {\n    color: var(--ce-text-tertiary);\n}\n\n.ce-select-toolbar {\n    display: flex;\n    align-items: center;\n    /* Minimum breathing room between the select-all label and the right\n       group once the auto margin collapses under pressure */\n    gap: 12px;\n    padding: 12px 16px;\n    border: 1px solid var(--ce-control-border);\n    border-bottom: none;\n    flex-shrink: 0;\n}\n\n/* CJK labels wrap per-character when the row is squeezed — never shrink it */\n.ce-select-toolbar .ce-checkbox {\n    white-space: nowrap;\n    flex-shrink: 0;\n}\n\n.ce-select-toolbar-end {\n    display: flex;\n    align-items: center;\n    gap: 8px;\n    margin-left: auto;\n    min-width: 0;\n}\n\n.ce-toolbar-loading {\n    display: flex;\n    align-items: center;\n    gap: 4px;\n    min-width: 0;\n    overflow: hidden;\n    white-space: nowrap;\n    font-size: 0.875rem;\n    color: var(--ce-text-tertiary);\n}\n\n.ce-toolbar-status {\n    flex-shrink: 0;\n    height: auto;\n    font-size: 0.75rem;\n    padding: 2px 2rem 2px 0.5rem;\n    width: 8.5rem;\n    text-overflow: ellipsis;\n}\n\n.ce-toolbar-hint {\n    min-width: 0;\n    overflow: hidden;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n    font-size: 0.75rem;\n    color: var(--ce-text-tertiary);\n    /* Highest shrink factor: the hint collapses before the loading\n       indicator starts truncating */\n    flex-shrink: 99;\n}\n\n.ce-toolbar-count {\n    flex-shrink: 0;\n    white-space: nowrap;\n    font-size: 0.875rem;\n    font-weight: 500;\n    font-variant-numeric: tabular-nums;\n    color: var(--ce-text-tertiary);\n}\n\n.ce-select-list {\n    position: relative;\n    width: 100%;\n    flex: 1;\n    min-height: 120px;\n    padding: 12px 16px;\n    overflow-x: hidden;\n    overflow-y: auto;\n    border: 1px solid var(--ce-control-border);\n    border-radius: 0 0 4px 4px;\n    white-space: nowrap;\n}\n\n.ce-select-item {\n    display: flex;\n    align-items: center;\n    gap: 6px;\n    overflow: hidden;\n}\n\n.ce-select-item-empty {\n    color: var(--ce-text-tertiary);\n}\n\n.ce-select-item .ce-checkbox {\n    flex: 1;\n    min-width: 0;\n}\n\n.ce-select-item .ce-checkbox-label {\n    overflow: hidden;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.ce-starred {\n    flex-shrink: 0;\n    color: #f59e0b;\n}\n\n.ce-select-item-meta {\n    flex-shrink: 0;\n    font-size: 0.7rem;\n    color: var(--ce-text-tertiary);\n    white-space: nowrap;\n    font-variant-numeric: tabular-nums;\n    min-width: 6.5rem;\n    text-align: right;\n}\n.ce-select-item-meta-active {\n    color: var(--ce-text-secondary);\n    font-weight: 600;\n}\n\n/* ── Sortable column header row ── */\n.ce-list-header {\n    display: flex;\n    align-items: center;\n    padding: 0 16px;\n    border: 1px solid var(--ce-control-border);\n    border-bottom: none;\n    background: var(--ce-list-header-surface);\n    user-select: none;\n    flex-shrink: 0;\n}\n\n.ce-list-header-cell {\n    flex-shrink: 0;\n    font-size: 0.68rem;\n    font-weight: 600;\n    color: var(--ce-text-tertiary);\n    letter-spacing: 0.03em;\n    text-transform: uppercase;\n    padding: 5px 4px;\n    white-space: nowrap;\n    min-width: 6.5rem;\n    text-align: right;\n}\n.ce-list-header-cell:hover {\n    color: var(--ce-text-primary);\n}\n.ce-list-header-cell-title {\n    flex: 1;\n    text-align: left;\n    padding-left: 28px; /* align with checkbox label */\n}\n.ce-list-header-cell-active {\n    color: var(--ce-accent);\n}\n\n.ce-load-more {\n    display: flex;\n    align-items: center;\n    justify-content: center;\n    gap: 8px;\n    margin: 8px 0 4px;\n}\n\n.ce-muted-count {\n    font-size: 0.75rem;\n    font-variant-numeric: tabular-nums;\n    color: var(--ce-text-tertiary);\n}\n\n.ce-action-bar {\n    display: flex;\n    flex-wrap: wrap;\n    align-items: center;\n    gap: 8px;\n    margin-top: 12px;\n}\n\n.ce-action-bar > .ce-select {\n    flex-shrink: 0;\n}\n\n/* The buttons wrap as one group, so Export never sits alone on its own row.\n   They only wrap among themselves when long labels overflow a full row. */\n.ce-action-buttons {\n    display: flex;\n    flex-wrap: wrap;\n    justify-content: flex-end;\n    flex-shrink: 0;\n    gap: 8px;\n    max-width: 100%;\n    margin-left: auto;\n}\n\n.ce-batch-note {\n    margin-top: 6px;\n    font-size: 0.75rem;\n    text-align: right;\n    color: var(--ce-text-tertiary);\n}\n\n.ce-progress-header {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 8px;\n    margin: 8px 0 4px;\n}\n\n.ce-progress-name {\n    overflow: hidden;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n    font-size: 0.875rem;\n    color: var(--ce-text-secondary);\n}\n\n.ce-progress-count {\n    flex-shrink: 0;\n    font-size: 0.875rem;\n    font-variant-numeric: tabular-nums;\n    color: var(--ce-text-tertiary);\n}\n\n.ce-progress {\n    width: 100%;\n    height: 10px;\n    margin-bottom: 16px;\n    border-radius: 9999px;\n    background-color: var(--ce-track);\n}\n\n.ce-progress-bar {\n    height: 100%;\n    border-radius: 9999px;\n    background-color: var(--ce-accent);\n}\n\n.ce-progress-bar-waiting {\n    background-color: #f59e0b;\n}\n\n@media (max-width: 480px) {\n    .ce-dialog { max-height: 90vh; }\n    .ce-list-header-cell:last-child { display: none; }\n    .ce-select-item-meta:last-child { display: none; }\n    .ce-action-bar > .ce-select { width: 100%; }\n}\n\n@keyframes ce-content-show {\n    from {\n        opacity: 0;\n        transform: translate(-50%, -48%) scale(0.96);\n    }\n    to {\n        opacity: 1;\n        transform: translate(-50%, -50%) scale(1);\n    }\n}\n");
 	function useCollapsedSidebar(container, isMobile) {
 		const [isCollapsed, setIsCollapsed] = h(false);
 		p(() => {
-			if (isMobile) {
+			if (isMobile && !container.closest("[data-app-navigation-rail]")) {
 				setIsCollapsed(false);
 				return;
 			}
@@ -14481,7 +14734,7 @@
 				onOpenChange: setOpen,
 				keepMounted: jsonOpen || settingOpen || exportOpen,
 				isMobile,
-				width: isMobile ? 316 : 268,
+				width: isMobile ? 316 : 292,
 				trigger: o(MenuItem, {
 					className: isCollapsedSidebar ? "ce-nav-trigger ce-nav-trigger-collapsed" : "ce-nav-trigger ce-nav-trigger-expanded",
 					text: t("ExportHelper"),
@@ -14582,11 +14835,10 @@
 	var PROFILE_BUTTON_SELECTOR = "[data-testid=\"accounts-profile-button\"]";
 	var SIDEBAR_SCROLL_SELECTOR = "[data-app-action-sidebar-scroll]";
 	var AUTOMATIONS_SELECTOR = "[data-sidebar-destination=\"builtin:automations\"]";
-	var RAIL_MENU_BUTTON_SELECTOR = "[data-app-navigation-rail] button[aria-haspopup=\"menu\"]";
 	var NAV_MENU_SELECTORS = [
 		PROFILE_BUTTON_SELECTOR,
 		SIDEBAR_SCROLL_SELECTOR,
-		RAIL_MENU_BUTTON_SELECTOR,
+		"[data-app-navigation-rail] button[aria-haspopup=\"menu\"]",
 		AUTOMATIONS_SELECTOR
 	];
 	function getNavMenuInsertionTarget(target) {
@@ -14595,47 +14847,56 @@
 		return wrapper;
 	}
 	function getNavMenuMounts() {
-		const profileButtons = Array.from(document.querySelectorAll(PROFILE_BUTTON_SELECTOR));
-		if (profileButtons.length > 0) return profileButtons.map((target) => ({
+		const mounts = Array.from(document.querySelectorAll(PROFILE_BUTTON_SELECTOR)).map((target) => ({
 			target,
-			insert: (container) => getNavMenuInsertionTarget(target).before(container)
+			insert: (container) => {
+				if (target.closest("[data-app-navigation-rail]")) container.style.pointerEvents = "auto";
+				getNavMenuInsertionTarget(target).before(container);
+			}
 		}));
-		const mounts = [];
 		Array.from(document.querySelectorAll(SIDEBAR_SCROLL_SELECTOR)).forEach((scrollRoot) => {
 			const footer = [scrollRoot.nextElementSibling, scrollRoot.parentElement?.nextElementSibling].find((el) => el?.querySelector("button[aria-haspopup=\"menu\"]"));
-			if (footer) mounts.push({
-				target: footer,
-				insert: (container) => {
-					Object.assign(container.style, {
-						paddingInline: "var(--padding-row-x)",
-						paddingTop: "8px"
-					});
-					footer.prepend(container);
-				}
-			});
-			else {
-				const sidebar = scrollRoot.closest("nav");
-				if (sidebar && !sidebar.hasAttribute("data-app-navigation-rail")) mounts.push({
-					target: scrollRoot,
+			if (footer) {
+				if (footer.querySelector(PROFILE_BUTTON_SELECTOR)) return;
+				mounts.push({
+					target: footer,
 					insert: (container) => {
 						Object.assign(container.style, {
-							flexShrink: "0",
-							paddingInline: "var(--padding-row-x, 8px)"
+							paddingInline: "var(--padding-row-x)",
+							paddingTop: "8px"
 						});
-						scrollRoot.before(container);
+						footer.prepend(container);
 					}
 				});
+			} else {
+				const sidebar = scrollRoot.closest("nav");
+				if (sidebar && !sidebar.hasAttribute("data-app-navigation-rail")) {
+					if (sidebar.querySelector(PROFILE_BUTTON_SELECTOR)) return;
+					mounts.push({
+						target: scrollRoot,
+						insert: (container) => {
+							Object.assign(container.style, {
+								flexShrink: "0",
+								paddingInline: "var(--padding-row-x, 8px)"
+							});
+							scrollRoot.before(container);
+						}
+					});
+				}
 			}
 		});
-		const railMenuButton = document.querySelector(RAIL_MENU_BUTTON_SELECTOR);
-		const rail = railMenuButton?.closest("[data-app-navigation-rail]");
-		const railRow = rail && Array.from(rail.children).find((row) => row.contains(railMenuButton));
-		if (railMenuButton && railRow) mounts.push({
-			target: railMenuButton,
-			insert: (container) => {
-				container.style.pointerEvents = "auto";
-				railRow.before(container);
-			}
+		document.querySelectorAll("[data-app-navigation-rail]").forEach((rail) => {
+			if (rail.querySelector(PROFILE_BUTTON_SELECTOR)) return;
+			const railMenuButton = rail.querySelector("button[aria-haspopup=\"menu\"]");
+			const railRow = railMenuButton && Array.from(rail.children).find((row) => row.contains(railMenuButton));
+			if (!railMenuButton || !railRow) return;
+			mounts.push({
+				target: railMenuButton,
+				insert: (container) => {
+					container.style.pointerEvents = "auto";
+					railRow.before(container);
+				}
+			});
 		});
 		if (mounts.length > 0) return mounts;
 		return Array.from(document.querySelectorAll(AUTOMATIONS_SELECTOR)).map((target) => ({

@@ -40,6 +40,35 @@ afterEach(() => {
 })
 
 describe('sidebar menu lifecycle', () => {
+    it('mounts a project shell during SPA navigation while the old sidebar is cached', async () => {
+        await act(async () => {
+            await import('../src/main')
+        })
+        const cached = document.querySelector('nav')!
+        cached.setAttribute('inert', '')
+        cached.hidden = true
+        const project = document.createElement('aside')
+        project.innerHTML = `
+            <nav data-app-navigation-rail><div><button aria-haspopup="menu"></button></div></nav>
+            <nav id="project"><div data-app-action-sidebar-scroll></div></nav>`
+        document.body.append(project)
+        await act(async () => {
+            vi.advanceTimersByTime(2000)
+        })
+        expect(project.querySelectorAll('.ce-root')).toHaveLength(2)
+        expect(document.querySelectorAll('[data-test-portal]')).toHaveLength(3)
+
+        project.remove()
+        cached.removeAttribute('inert')
+        cached.hidden = false
+        await act(async () => {
+            vi.advanceTimersByTime(1000)
+        })
+        expect(document.querySelectorAll('.ce-root')).toHaveLength(1)
+        expect(document.querySelectorAll('[data-test-portal]')).toHaveLength(1)
+        expect(cleanup).toHaveBeenCalledTimes(2)
+    })
+
     it('unmounts portals and effects when ChatGPT replaces the sidebar', async () => {
         await act(async () => {
             await import('../src/main')

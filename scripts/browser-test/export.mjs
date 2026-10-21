@@ -1,13 +1,12 @@
 // Click an exporter menu item in the ChatGPT tab, wait for the download,
-// move it out of the Downloads folder and unpack it if it is a zip.
+// move it to the output folder and unpack it if it is a zip.
 // A second label clicks an item in the dialog the first one opens, such as
 // `JSON "OpenAI Official Format"`.
 //
 // Usage: node export.mjs <menu item> [dialog item] [--out dir] [--timeout seconds]
-// Env:   DOWNLOAD_DIR (default ~/Downloads)
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, extname, join } from 'node:path'
 import JSZip from 'jszip'
 import { connect } from './cdp.mjs'
@@ -27,10 +26,21 @@ if (!item) {
     process.exit(1)
 }
 
-const downloadDir = process.env.DOWNLOAD_DIR || join(homedir(), 'Downloads')
-const before = new Set(readdirSync(downloadDir))
+// Chrome only lets a tab download once without a user gesture; later
+// downloads wait on a prompt in the address bar. A DevTools download
+// behavior skips that check and saves to our own folder. The folder only
+// applies while this connection is open, so keep it open until the file lands.
+const downloadDir = mkdtempSync(join(tmpdir(), 'chatgpt-exporter-download-'))
+const browser = await connect({ target: 'browser' })
+await browser.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadDir })
 
+// An alert means the exporter refused, so stop waiting and show it. Keep the
+// connection open while waiting, since cdp.mjs answers dialogs only then.
 const cdp = await connect()
+let alerted = null
+cdp.on('Page.javascriptDialogOpening', ({ type, message }) => {
+    if (type === 'alert') alerted = message
+})
 await cdp.run(`
     const clickItem = async (label) => {
         for (let i = 0; i < 20; i++) {
@@ -44,7 +54,6 @@ await cdp.run(`
     await clickItem(${JSON.stringify(item)})
     ${dialogItem ? `await clickItem(${JSON.stringify(dialogItem)})` : ''}
 `)
-cdp.close()
 console.log('clicked', [item, dialogItem].filter(Boolean).join(' > '))
 
 // Wait for a new file whose size has settled.
@@ -53,7 +62,8 @@ let file = null
 let lastSize = -1
 while (Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 1000))
-    const added = readdirSync(downloadDir).filter(name => !before.has(name) && !name.endsWith('.crdownload') && !name.startsWith('.'))
+    if (alerted !== null) break
+    const added = readdirSync(downloadDir).filter(name => !name.endsWith('.crdownload') && !name.startsWith('.'))
     if (added.length === 0) continue
     const candidate = join(downloadDir, added[0])
     const size = statSync(candidate).size
@@ -61,8 +71,13 @@ while (Date.now() < deadline) {
     file = candidate
     lastSize = size
 }
+cdp.close()
+browser.close()
 if (!file) {
-    console.error(`No download within ${timeout / 1000}s. Check the page console for errors.`)
+    rmSync(downloadDir, { recursive: true, force: true })
+    console.error(alerted !== null
+        ? `The page alerted instead of downloading: ${alerted}`
+        : `No download within ${timeout / 1000}s. Check the page console for errors.`)
     process.exit(1)
 }
 
@@ -72,6 +87,7 @@ for (let n = 1; existsSync(target); n++) {
     target = join(outDir, `${basename(file, extname(file))}-${n}${extname(file)}`)
 }
 renameSync(file, target)
+rmSync(downloadDir, { recursive: true, force: true })
 console.log('saved', target, `${(lastSize / 1024 / 1024).toFixed(1)}MB`)
 
 if (target.endsWith('.zip')) {

@@ -23,7 +23,7 @@ function useCollapsedSidebar(container: HTMLDivElement, isMobile: boolean) {
     const [isCollapsed, setIsCollapsed] = useState(false)
 
     useEffect(() => {
-        if (isMobile) {
+        if (isMobile && !container.closest('[data-app-navigation-rail]')) {
             setIsCollapsed(false)
             return
         }
@@ -140,7 +140,7 @@ function MenuInner({ container }: { container: HTMLDivElement }) {
                 onOpenChange={setOpen}
                 keepMounted={jsonOpen || settingOpen || exportOpen}
                 isMobile={isMobile}
-                width={isMobile ? 316 : 268}
+                width={isMobile ? 316 : 292}
                 trigger={(
                     <MenuItem
                         className={isCollapsedSidebar

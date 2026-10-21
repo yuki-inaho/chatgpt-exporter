@@ -8,13 +8,14 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { connect } from './cdp.mjs'
+import { fetchVerifiedRequire } from './require.mjs'
 
 const args = process.argv.slice(2)
 const reload = args.includes('--reload')
-const distPath = args.find(arg => arg !== '--reload') || fileURLToPath(new URL('../../../../dist/chatgpt.user.js', import.meta.url))
+const distPath = args.find(arg => arg !== '--reload') || fileURLToPath(new URL('../../dist/chatgpt.user.js', import.meta.url))
 const dist = readFileSync(distPath, 'utf8')
 const requires = [...dist.matchAll(/^\/\/ @require\s+(\S+)/gm)].map(match => match[1])
-const libraries = await Promise.all(requires.map(url => fetch(url).then(res => res.text())))
+const libraries = await Promise.all(requires.map(fetchVerifiedRequire))
 
 // src/utils/storage.ts only uses these three.
 const shim = `
@@ -43,13 +44,12 @@ if (injected) {
 }
 
 const sources = [...requires.map((url, index) => [url, libraries[index]]), ['GM shim', shim], [distPath, dist]]
-for (const [name, source] of sources) {
-    try {
+try {
+    for (const [name, source] of sources) {
         await cdp.evaluate(source)
         console.log('ok', name)
     }
-    catch (error) {
-        console.log('failed', name, String(error).slice(0, 400))
-    }
 }
-cdp.close()
+finally {
+    cdp.close()
+}
